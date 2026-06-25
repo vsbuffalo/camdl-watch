@@ -12,7 +12,11 @@ dependencies = [
     "matplotlib>=3.8",
     "scipy>=1.11",
     "pygments>=2.20.0",
+    "defopt>=6.4",
 ]
+
+[project.scripts]
+camdl-watch = "camdl_watch.cli:cli"
 
 [project.optional-dependencies]
 dev = [

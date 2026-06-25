@@ -12,24 +12,54 @@ Self-contained: its own `uv` project, vendored plot styling, no import from
 your analysis package. Read-only on the run store — point it at any camdl
 project's fit store and it just watches.
 
+## Install
+
+Standalone tool — install it once, point it at any camdl project's fit store.
+With [uv](https://docs.astral.sh/uv/):
+
+```sh
+uv tool install /path/to/camdl-watcher        # local checkout
+# or, once it's on GitHub:
+# uv tool install git+https://github.com/<you>/camdl-watcher
+```
+
+That puts a `camdl-watch` command on your PATH, runnable from any project. To
+run it without installing, use `uvx`:
+
+```sh
+uvx --from /path/to/camdl-watcher camdl-watch --port 8804
+```
+
+Or vendor it into another project's dev dependencies:
+
+```sh
+uv add --dev /path/to/camdl-watcher
+```
+
 ## Run
 
 From your camdl project root:
 
 ```sh
-uv run shiny run camdl_watch.app:app --port 8804 --host 127.0.0.1
+camdl-watch --port 8804
 ```
 
-Then open <http://127.0.0.1:8804>. Bind `--host 0.0.0.0` to view from a phone
-over the LAN / Tailscale. Pick any free port; check first with
-`lsof -iTCP:8804 -sTCP:LISTEN -n -P`.
+Then open <http://127.0.0.1:8804>. Flags:
 
-The store directory defaults to `results/fits` under the current working
-directory; override with the `CAMDL_WATCH_STORE` env var:
+- `--port` / `-p` — TCP port (default 8804). Check it's free first with
+  `lsof -iTCP:8804 -sTCP:LISTEN -n -P`.
+- `--host` — interface to bind; `--host 0.0.0.0` to view from a phone over
+  LAN / Tailscale (default `127.0.0.1`).
+- `--store` / `-s` — the fit store to watch (the directory of run dirs).
+  Defaults to `results/fits` under the current directory.
 
 ```sh
-CAMDL_WATCH_STORE=/path/to/results/fits uv run shiny run camdl_watch.app:app --port 8804
+camdl-watch --port 8804 --host 0.0.0.0 --store /path/to/results/fits
 ```
+
+`--store` just sets the `CAMDL_WATCH_STORE` env var, so that env var works too;
+`python -m camdl_watch ...` is equivalent to the `camdl-watch` command. (Not
+installed? `uv run camdl-watch ...` from a checkout works the same.)
 
 ## What it shows
 
