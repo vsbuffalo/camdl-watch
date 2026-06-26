@@ -52,6 +52,13 @@ class PosteriorResponse(BaseModel):
     params: list[ParamPosterior]
 
 
+class PriorCurve(BaseModel):
+    """A smooth analytic prior density: ``y`` evaluated at grid ``x`` (same length)."""
+
+    x: list[float]
+    y: list[float]
+
+
 class DrawsResponse(BaseModel):
     """Row-aligned post-warmup posterior draws — the substrate for proper
     statistical graphics (marginal densities, the pair/corner plot). Row ``i`` is
@@ -64,11 +71,21 @@ class DrawsResponse(BaseModel):
     warmup_cutoff: int
     n_draws: int
     params: list[str]
+    # Objective columns (log_posterior / log_likelihood) present in the trace,
+    # included row-aligned in `draws` so they can be paired against parameters
+    # (Stan's lp__). Listed separately from `params` — they're diagnostics, not
+    # estimated coordinates, and carry no prior.
+    objectives: list[str] = []
     chain: list[int]
     draws: dict[str, list[float]]
     # Marginal prior samples per param (NOT row-aligned; truncated to bounds, may
-    # be shorter/empty) — for the prior overlay on the pair-plot diagonals.
+    # be shorter/empty). Retained for compatibility; the diagonals now overlay
+    # ``prior_density`` instead.
     prior: dict[str, list[float]] = {}
+    # Smooth ANALYTIC prior density per param: ``{param: {x: [...], y: [...]}}``
+    # over the param's posterior window — a clean curve for the pair-plot
+    # diagonals (a binned histogram of clipped samples reads as noise).
+    prior_density: dict[str, PriorCurve] = {}
 
 
 class StreamInfo(BaseModel):
@@ -244,3 +261,54 @@ class TracesResponse(BaseModel):
     warmup_cutoff: int
     params: list[str]
     traces: list[ParamTrace]
+
+
+# --- Diagnostics tab ---------------------------------------------------------
+
+
+class ParamDiagnostic(BaseModel):
+    """One parameter's convergence/precision diagnostics. R̂ and combined ESS are
+    camdl-authoritative when a stage summary exists, else the live arviz estimate;
+    tail-ESS / MCSE / sep are the live estimate. ``ess_per_chain`` is camdl's
+    per-chain breakdown (empty when unavailable). None where not estimable."""
+
+    name: str
+    symbol: str | None = None
+    rhat: float | None = None
+    ess_bulk: float | None = None
+    ess_tail: float | None = None
+    mcse: float | None = None
+    mean: float
+    sd: float
+    sep: float | None = None
+    ess_per_chain: list[float] = []
+
+
+class ChainMixing(BaseModel):
+    """Per-chain mixing metric — MH/PMMH acceptance rate or PGAS trajectory
+    renewal — with an optional healthy band ``(lo, hi)``."""
+
+    label: str
+    values: list[float]
+    band: tuple[float, float] | None = None
+
+
+class DiagnosticsResponse(BaseModel):
+    """The full convergence picture for a run: camdl's verdict (findings), a
+    per-parameter R̂/ESS table, per-chain mixing, and the PMMH MAP if present.
+    ``source`` is ``camdl`` when an authoritative stage summary backs R̂/ESS, else
+    ``live`` (the watcher's arviz estimate while a run is still sampling)."""
+
+    run_id: str
+    warmup_pct: int
+    warmup_cutoff: int
+    n_tail: int
+    n_chains: int
+    stage: str | None = None
+    source: str
+    logpost_label: str
+    findings: list[FindingGroup]
+    params: list[ParamDiagnostic]
+    mixing: ChainMixing | None = None
+    map_loglik: float | None = None
+    map_chain: int | None = None

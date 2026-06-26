@@ -16,6 +16,10 @@ const FRAME = '#e5e5e5' // neutral-200 — hairline panel border
 const AXIS = '#737373' // neutral-500 — tick labels
 const MONO = 'var(--font-mono)'
 
+// Auxiliary objective traces (Stan's lp__ and friends) that ride at the end of
+// the trace list. Estimated-param panels are always shown; these are toggleable.
+const OBJECTIVE_NAMES = new Set(['log_posterior', 'log_likelihood'])
+
 type TracePoint = { iter: number; value: number; chain: number }
 
 /**
@@ -152,6 +156,33 @@ export function TracesTab({ runId }: { runId: string }) {
     return [...set].sort((a, b) => a - b)
   }, [data])
 
+  // Objective panels (log_posterior / log_likelihood) default ON; the user can
+  // toggle each off. We track the HIDDEN set so the default — empty — shows all.
+  const [hiddenObjectives, setHiddenObjectives] = useState<Set<string>>(
+    () => new Set(),
+  )
+  const toggleObjective = (name: string) =>
+    setHiddenObjectives((prev) => {
+      const next = new Set(prev)
+      if (next.has(name)) next.delete(name)
+      else next.add(name)
+      return next
+    })
+
+  const objectiveTraces = useMemo(
+    () => data?.traces.filter((t) => OBJECTIVE_NAMES.has(t.param)) ?? [],
+    [data],
+  )
+  // Estimated-param panels are always shown; objective panels are filtered by
+  // their checkbox state.
+  const visibleTraces = useMemo(
+    () =>
+      data?.traces.filter(
+        (t) => !OBJECTIVE_NAMES.has(t.param) || !hiddenObjectives.has(t.param),
+      ) ?? [],
+    [data, hiddenObjectives],
+  )
+
   return (
     <Card
       className={cn(
@@ -186,6 +217,28 @@ export function TracesTab({ runId }: { runId: string }) {
 
       {data && data.traces.length > 0 && (
         <>
+          {objectiveTraces.length > 0 && (
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-neutral-100 px-3 py-2">
+              <span className="text-[10px] font-medium uppercase tracking-wider text-neutral-400">
+                objectives
+              </span>
+              {objectiveTraces.map((t) => (
+                <label
+                  key={t.param}
+                  className="flex cursor-pointer select-none items-center gap-1.5 font-mono text-[11px] text-neutral-700"
+                >
+                  <input
+                    type="checkbox"
+                    checked={!hiddenObjectives.has(t.param)}
+                    onChange={() => toggleObjective(t.param)}
+                    className="h-3 w-3 accent-neutral-700"
+                  />
+                  <span>{t.param}</span>
+                </label>
+              ))}
+            </div>
+          )}
+
           <div className="flex items-center justify-between gap-3 border-b border-neutral-100 px-3 py-2">
             <span className="text-[10px] font-medium uppercase tracking-wider text-neutral-400">
               iteration traces · mixing
@@ -193,7 +246,7 @@ export function TracesTab({ runId }: { runId: string }) {
             <ChainLegend chains={chainDomain} />
           </div>
           <div>
-            {data.traces.map((t, i) => (
+            {visibleTraces.map((t, i) => (
               <div
                 key={t.param}
                 className="border-b border-neutral-100 px-3 py-1.5 last:border-b-0"
@@ -204,7 +257,7 @@ export function TracesTab({ runId }: { runId: string }) {
                 <TracePanel
                   series={t.series}
                   chainDomain={chainDomain}
-                  showXAxis={i === data.traces.length - 1}
+                  showXAxis={i === visibleTraces.length - 1}
                 />
               </div>
             ))}

@@ -36,10 +36,13 @@ from ..state import (
     Status,
 )
 from .models import (
+    ChainMixing,
+    DiagnosticsResponse,
     DimensionInfo,
     DrawsResponse,
     FindingGroup,
     ObservedPoint,
+    ParamDiagnostic,
     ParamFamily,
     ParamGroups,
     ParamPosterior,
@@ -47,6 +50,7 @@ from .models import (
     PosteriorResponse,
     PredictivePoint,
     PredictiveResponse,
+    PriorCurve,
     RunDetail,
     RunSummary,
     SourceFile,
@@ -291,17 +295,24 @@ def _param_posterior(
 
 def _build_draws(
     meta: RunMeta, rs: RunState, cutoff: int, max_draws: int
-) -> tuple[list[int], dict[str, np.ndarray]]:
-    """Row-aligned, pooled, thinned post-warmup draws.
+) -> tuple[list[int], dict[str, np.ndarray], list[str]]:
+    """Row-aligned, pooled, thinned post-warmup draws (params + objectives).
 
     Within a chain the i-th retained sweep is the same joint sample across
-    params; chains are concatenated (carrying a chain id per row). Rows where any
-    estimated coordinate is non-finite are dropped so every column stays aligned
-    and JSON-serializable, then the whole set is thinned to ``max_draws`` by an
-    even stride."""
+    columns; chains are concatenated (carrying a chain id per row). The objective
+    aux columns (``log_posterior`` / ``log_likelihood``), when present in every
+    chain, are pooled alongside the params so they can be paired against them
+    (Stan's lp__). Rows where any column is non-finite are dropped so every
+    column stays aligned and JSON-serializable, then thinned to ``max_draws`` by
+    an even stride. Returns ``(chain, cols, objectives)``."""
     params = list(meta.estimated)
+    objectives = [
+        c for c in ("log_posterior", "log_likelihood")
+        if c in AUX_COLUMNS and rs.chains and all(c in b.aux for b in rs.chains.values())
+    ]
+    wanted = params + objectives
     chain_parts: list[np.ndarray] = []
-    col_parts: dict[str, list[np.ndarray]] = {p: [] for p in params}
+    col_parts: dict[str, list[np.ndarray]] = {p: [] for p in wanted}
     for cid, buf in sorted(rs.chains.items()):
         idx = np.where(buf.iters >= cutoff)[0]
         if idx.size == 0:
@@ -311,23 +322,27 @@ def _build_draws(
             col_parts[p].append(
                 buf.values[p][idx] if p in buf.values else np.full(idx.size, np.nan)
             )
+        for o in objectives:
+            col_parts[o].append(
+                buf.aux[o][idx] if o in buf.aux else np.full(idx.size, np.nan)
+            )
     if not chain_parts:
-        return [], {p: np.empty(0) for p in params}
+        return [], {p: np.empty(0) for p in wanted}, objectives
 
     chain = np.concatenate(chain_parts)
-    cols = {p: np.concatenate(col_parts[p]) for p in params}
+    cols = {p: np.concatenate(col_parts[p]) for p in wanted}
     finite = np.ones(chain.size, dtype=bool)
-    for p in params:
+    for p in wanted:
         finite &= np.isfinite(cols[p])
     chain = chain[finite]
-    cols = {p: cols[p][finite] for p in params}
+    cols = {p: cols[p][finite] for p in wanted}
 
     total = chain.size
     if total > max_draws:
         sel = np.unique(np.linspace(0, total - 1, max_draws).astype(int))
         chain = chain[sel]
-        cols = {p: cols[p][sel] for p in params}
-    return chain.tolist(), cols
+        cols = {p: cols[p][sel] for p in wanted}
+    return chain.tolist(), cols, objectives
 
 
 def _find_meta(store: Path, run_id: str) -> RunMeta | None:
@@ -412,6 +427,35 @@ def _sample_priors(rs: RunState, params: list[str], n: int = 2000) -> dict[str, 
     return out
 
 
+def _prior_curves(
+    rs: RunState, params: list[str], cols: dict[str, np.ndarray], n_grid: int = 80
+) -> dict[str, PriorCurve]:
+    """Smooth analytic prior density per param, evaluated over the param's
+    posterior window (its draws' padded extent) so it overlays the pair-plot
+    diagonal cleanly. A binned histogram of prior samples clipped to that window
+    reads as noise; the analytic density is exact and smooth. Flat/unbounded
+    priors (no informative shape) are skipped."""
+    out: dict[str, PriorCurve] = {}
+    for p in params:
+        spec = rs.priors.get(p)
+        if spec is None or spec.family is PriorFamily.FLAT:
+            continue
+        arr = cols.get(p)
+        if arr is None or arr.size < 2:
+            continue
+        lo, hi = float(np.min(arr)), float(np.max(arr))
+        if not (np.isfinite(lo) and np.isfinite(hi)) or hi <= lo:
+            continue
+        pad = (hi - lo) * 0.04
+        grid = np.linspace(lo - pad, hi + pad, n_grid)
+        dens = np.exp(ingest.log_prior_density(spec, grid))
+        dens = np.where(np.isfinite(dens), dens, 0.0)
+        if not np.any(dens > 0):
+            continue
+        out[p] = PriorCurve(x=grid.tolist(), y=dens.tolist())
+    return out
+
+
 @router.get("/runs/{run_id}/draws", response_model=DrawsResponse)
 def get_draws(
     run_id: str,
@@ -433,15 +477,15 @@ def get_draws(
     if rs.max_iter() is None:
         return DrawsResponse(
             run_id=run_id, warmup_pct=warmup_pct, warmup_cutoff=cutoff,
-            n_draws=0, params=params, chain=[], draws={p: [] for p in params},
-            prior=prior,
+            n_draws=0, params=params, objectives=[], chain=[],
+            draws={p: [] for p in params}, prior=prior, prior_density={},
         )
-    chain, cols = _build_draws(meta, rs, cutoff, max_draws)
+    chain, cols, objectives = _build_draws(meta, rs, cutoff, max_draws)
     return DrawsResponse(
         run_id=run_id, warmup_pct=warmup_pct, warmup_cutoff=cutoff,
-        n_draws=len(chain), params=params,
-        chain=chain, draws={p: cols[p].tolist() for p in params},
-        prior=prior,
+        n_draws=len(chain), params=params, objectives=objectives,
+        chain=chain, draws={k: v.tolist() for k, v in cols.items()},
+        prior=prior, prior_density=_prior_curves(rs, params, cols),
     )
 
 
@@ -637,4 +681,80 @@ def get_traces(
     return TracesResponse(
         run_id=run_id, warmup_cutoff=cutoff,
         params=[t.param for t in traces], traces=traces,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Diagnostics tab
+# ---------------------------------------------------------------------------
+
+
+@router.get("/runs/{run_id}/diagnostics", response_model=DiagnosticsResponse)
+def get_diagnostics(
+    run_id: str, warmup_pct: int = Query(default=50, ge=0, le=100)
+) -> DiagnosticsResponse:
+    """Convergence diagnostics: camdl's authoritative verdict (findings) and
+    R̂/ESS where a stage summary exists, else the watcher's live arviz estimate;
+    plus per-chain mixing (acceptance / trajectory renewal) and the PMMH MAP."""
+    store = _store()
+    meta = _find_meta(store, run_id)
+    if meta is None:
+        raise HTTPException(status_code=404, detail=f"run not found: {run_id}")
+    rs = _build_run_state(meta)
+    cutoff = _warmup_cutoff(rs, warmup_pct)
+    summ = rs.summary
+    base = dict(
+        run_id=run_id, warmup_pct=warmup_pct, warmup_cutoff=cutoff,
+        n_chains=len(rs.chains),
+        stage=(summ.stage if summ is not None and summ.stage else None),
+        logpost_label=meta.backend.logpost_label,
+    )
+    if rs.max_iter() is None:
+        return DiagnosticsResponse(
+            **base, n_tail=0, source="live", findings=[], params=[],
+        )
+
+    diag = diag_mod.compute_diagnostics(rs, cutoff, params=rs.params)
+
+    findings: list[FindingGroup] = []
+    if summ is not None:
+        for g in diag_mod.summarize_findings(summ.findings):
+            findings.append(FindingGroup(
+                kind=g.kind, severity=g.severity.value,
+                headline=g.headline, params=list(g.params),
+            ))
+
+    params_out: list[ParamDiagnostic] = []
+    for p in meta.estimated:
+        pd = diag.per_param.get(p)
+        if pd is None:
+            continue
+        rhat_v, _ = diag_mod.effective_rhat(diag, summ, p)
+        ess_v, _ = diag_mod.effective_ess(diag, summ, p)
+        block = meta.docs.for_param(p)
+        epc = summ.ess_per_chain.get(p, []) if summ is not None else []
+        params_out.append(ParamDiagnostic(
+            name=p, symbol=(block.symbol if block else None),
+            rhat=_finite_or_none(rhat_v), ess_bulk=_finite_or_none(ess_v),
+            ess_tail=_finite_or_none(pd.tail_ess), mcse=_finite_or_none(pd.mcse),
+            mean=_fnum(pd.mean), sd=_fnum(pd.sd),
+            sep=_finite_or_none(diag.chain_separation.get(p)),
+            ess_per_chain=[_fnum(x) for x in epc],
+        ))
+
+    mixing = None
+    mix = diag_mod.per_chain_mixing(rs, cutoff)
+    if mix is not None:
+        label, values, _labels, band = mix
+        mixing = ChainMixing(
+            label=label, values=[_fnum(v) for v in values],
+            band=((float(band[0]), float(band[1])) if band and len(band) == 2 else None),
+        )
+
+    source = "camdl" if (summ is not None and summ.rhat) else "live"
+    return DiagnosticsResponse(
+        **base, n_tail=diag.n_tail, source=source,
+        findings=findings, params=params_out, mixing=mixing,
+        map_loglik=(_finite_or_none(summ.map_loglik) if summ is not None else None),
+        map_chain=(summ.map_chain if summ is not None else None),
     )

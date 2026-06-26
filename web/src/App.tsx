@@ -6,8 +6,8 @@ import { PosteriorTab } from '@/components/PosteriorTab'
 import { PairTab } from '@/components/PairTab'
 import { PredictiveTab } from '@/components/PredictiveTab'
 import { TracesTab } from '@/components/TracesTab'
+import { DiagnosticsTab } from '@/components/DiagnosticsTab'
 import { SourceTab } from '@/components/SourceTab'
-import { ComingSoon } from '@/components/ComingSoon'
 import { ForestSkeleton, MutedNotice } from '@/components/States'
 import { Card } from '@/components/ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -46,7 +46,7 @@ function ResultsTabs({ run }: { run: RunSummary }) {
           <TracesTab runId={run.run_id} />
         </TabsContent>
         <TabsContent value="diagnostics">
-          <ComingSoon label="Diagnostics" />
+          <DiagnosticsTab runId={run.run_id} />
         </TabsContent>
         <TabsContent value="source">
           <SourceTab runId={run.run_id} />

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import * as Plot from '@observablehq/plot'
 import type { DrawsResponse, PosteriorResponse } from '@/api/client'
+import { fmtTick } from '@/lib/format'
 
 /**
  * Subtle categorical palette for chains — muted 700-ish hues, not a rainbow.
@@ -23,6 +24,8 @@ const CHAIN_COLORS = [
 const MIN_CELL = 72
 const MAX_CELL = 200
 const LABEL_W = 26 // px gutter for the left row labels (rotated vertical, so narrow)
+const Y_AXIS_W = 42 // px strip down the left holding each row's value y-axis ticks
+const X_AXIS_H = 24 // px strip along the bottom holding each column's value x-axis ticks
 
 const FRAME = '#e5e5e5' // neutral-200 — hairline cell border
 const POST_BAR = '#525252' // neutral-600 — posterior marginal (primary, darker)
@@ -36,7 +39,7 @@ type CellSpec =
   | {
       kind: 'diag'
       values: number[]
-      prior: number[]
+      priorDensity: { x: number[]; y: number[] } | null
       median: number | null
       symbol: string
     }
@@ -53,38 +56,6 @@ function extent(xs: number[]): [number, number] {
 
 function paddedDomain(xs: number[]): [number, number] | undefined {
   const [lo, hi] = extent(xs)
-  if (!Number.isFinite(lo) || !Number.isFinite(hi) || lo === hi) return undefined
-  const pad = (hi - lo) * 0.04
-  return [lo - pad, hi + pad]
-}
-
-/** Linear-interpolated quantile of an already-sorted array. Display-only. */
-function quantileSorted(sorted: number[], q: number): number {
-  if (sorted.length === 0) return NaN
-  if (sorted.length === 1) return sorted[0]!
-  const idx = (sorted.length - 1) * q
-  const lo = Math.floor(idx)
-  const hi = Math.ceil(idx)
-  if (lo === hi) return sorted[lo]!
-  const t = idx - lo
-  return sorted[lo]! * (1 - t) + sorted[hi]! * t
-}
-
-/**
- * Shared x-window for a diagonal cell: the posterior's full data range unioned
- * with the prior's CENTRAL ~95% (2.5–97.5 pct), so a very broad prior sets a
- * sensible window instead of flattening the posterior into a spike. This is a
- * *drawing window*, computed inline purely for display — not a reported stat.
- */
-function diagDomain(post: number[], prior: number[]): [number, number] | undefined {
-  let [lo, hi] = extent(post)
-  if (prior.length > 1) {
-    const sorted = [...prior].sort((a, b) => a - b)
-    const p025 = quantileSorted(sorted, 0.025)
-    const p975 = quantileSorted(sorted, 0.975)
-    if (Number.isFinite(p025)) lo = Math.min(lo, p025)
-    if (Number.isFinite(p975)) hi = Math.max(hi, p975)
-  }
   if (!Number.isFinite(lo) || !Number.isFinite(hi) || lo === hi) return undefined
   const pad = (hi - lo) * 0.04
   return [lo - pad, hi + pad]
@@ -143,37 +114,30 @@ function PairCell({
         ],
       })
     } else {
-      const domain = diagDomain(spec.values, spec.prior)
+      const domain = paddedDomain(spec.values)
       // More room with bigger cells → a few more bins; clamp so it stays crisp.
       const nbins = Math.max(14, Math.min(28, Math.round(size / 9)))
       const marks: Plot.Markish[] = []
 
       if (domain) {
         const thresholds = makeThresholds(domain, nbins)
-        // Prior first (behind): light, clearly secondary. Clip to the window so
-        // a broad prior's tails don't renormalize the in-view bars away.
-        const priorVals = spec.prior.filter(
-          (v) => v >= domain[0] && v <= domain[1],
-        )
-        if (priorVals.length > 1) {
+        const binwidth = (domain[1] - domain[0]) / nbins
+        // Prior first (behind): the smooth ANALYTIC density, scaled into the
+        // posterior's `proportion` units (density × bin width) so heights are
+        // directly comparable. A binned histogram of prior samples clipped to
+        // this window reads as noise; the analytic curve is exact and smooth.
+        const pc = spec.priorDensity
+        if (pc && pc.x.length > 1) {
+          const pts = pc.x.map((x, i) => ({ x, y: (pc.y[i] ?? 0) * binwidth }))
           marks.push(
-            Plot.rectY(
-              priorVals,
-              Plot.binX<Plot.RectYOptions>(
-                { y: 'proportion' },
-                {
-                  x: (d: number) => d,
-                  thresholds,
-                  fill: PRIOR_FILL,
-                  fillOpacity: 0.6,
-                  stroke: PRIOR_STROKE,
-                  strokeWidth: 0.5,
-                  strokeOpacity: 0.7,
-                  insetLeft: 0.25,
-                  insetRight: 0.25,
-                },
-              ),
-            ),
+            Plot.areaY(pts, { x: 'x', y: 'y', fill: PRIOR_FILL, fillOpacity: 0.55 }),
+            Plot.line(pts, {
+              x: 'x',
+              y: 'y',
+              stroke: PRIOR_STROKE,
+              strokeWidth: 0.75,
+              strokeOpacity: 0.85,
+            }),
           )
         }
         // Posterior on top: darker solid bars. Same bins + `proportion` reducer
@@ -227,6 +191,87 @@ function PairCell({
   return <div style={{ width: size, height: size }} ref={ref} />
 }
 
+/**
+ * A dedicated outer-edge axis strip: a single Observable Plot containing ONLY
+ * an axis (no data marks), self-drawn into a ref like the cells. Living in its
+ * own grid track keeps the data cells full-bleed and pixel-aligned — the strip
+ * borrows the cells' `margin:2` on the shared axis so its ticks sit directly
+ * under (x) or beside (y) the column/row's data.
+ */
+function AxisStrip({
+  kind,
+  domain,
+  w,
+  h,
+}: {
+  kind: 'x' | 'y'
+  domain: [number, number] | undefined
+  w: number
+  h: number
+}) {
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const el = ref.current
+    if (!el || w <= 0 || h <= 0 || !domain) return
+
+    const style = {
+      background: 'transparent' as const,
+      color: '#737373',
+      fontSize: '9px',
+      fontFamily: 'var(--font-mono)',
+    }
+
+    const node =
+      kind === 'x'
+        ? Plot.plot({
+            width: w,
+            height: h,
+            marginLeft: 2,
+            marginRight: 2,
+            marginTop: 0,
+            marginBottom: h - 4,
+            style,
+            x: {
+              domain,
+              ticks: 3,
+              tickFormat: (d: number) => fmtTick(d),
+              tickSize: 2,
+              tickPadding: 3,
+              label: null,
+            },
+            y: { axis: null },
+            marks: [],
+          })
+        : Plot.plot({
+            width: w,
+            height: h,
+            marginTop: 2,
+            marginBottom: 2,
+            marginRight: 0,
+            marginLeft: w - 4,
+            style,
+            y: {
+              domain,
+              ticks: 4,
+              tickFormat: (d: number) => fmtTick(d),
+              tickSize: 2,
+              tickPadding: 3,
+              label: null,
+            },
+            x: { axis: null },
+            marks: [],
+          })
+
+    el.replaceChildren(node)
+    return () => {
+      node.remove()
+    }
+  }, [kind, domain, w, h])
+
+  return <div style={{ width: w, height: h }} ref={ref} />
+}
+
 interface PairPlotProps {
   draws: DrawsResponse
   posterior?: PosteriorResponse
@@ -266,7 +311,7 @@ export function PairPlot({ draws, posterior, params }: PairPlotProps) {
 
   const cell = useMemo(() => {
     if (n < 1 || containerWidth <= 0) return MIN_CELL
-    const avail = containerWidth - LABEL_W
+    const avail = containerWidth - LABEL_W - Y_AXIS_W
     return Math.max(MIN_CELL, Math.min(MAX_CELL, Math.floor(avail / n)))
   }, [containerWidth, n])
 
@@ -286,8 +331,8 @@ export function PairPlot({ draws, posterior, params }: PairPlotProps) {
   }, [params, posterior])
 
   const anyPrior = useMemo(
-    () => params.some((p) => (draws.prior[p]?.length ?? 0) > 1),
-    [params, draws.prior],
+    () => params.some((p) => (draws.prior_density?.[p]?.x.length ?? 0) > 1),
+    [params, draws.prior_density],
   )
 
   const labelFs = Math.round(Math.max(11, Math.min(15, cell / 13)))
@@ -312,12 +357,12 @@ export function PairPlot({ draws, posterior, params }: PairPlotProps) {
             className="grid gap-px"
             style={{
               width: 'max-content',
-              gridTemplateColumns: `${LABEL_W}px repeat(${n}, ${cell}px)`,
-              gridTemplateRows: `repeat(${n}, ${cell}px) auto`,
+              gridTemplateColumns: `${LABEL_W}px ${Y_AXIS_W}px repeat(${n}, ${cell}px)`,
+              gridTemplateRows: `repeat(${n}, ${cell}px) ${X_AXIS_H}px auto`,
             }}
           >
           {params.map((rowName, r) => (
-            // One matrix row: left symbol gutter, then N cells.
+            // One matrix row: left symbol gutter, value y-axis strip, then N cells.
             <Row key={rowName}>
               <div
                 className="flex items-center justify-center font-medium text-neutral-500"
@@ -332,6 +377,18 @@ export function PairPlot({ draws, posterior, params }: PairPlotProps) {
                   {meta[r]!.symbol}
                 </span>
               </div>
+              {/* y-axis value ticks for this row's data. Row 0 is a marginal
+                  density (no meaningful value y-axis) → blank. */}
+              {r === 0 ? (
+                <div />
+              ) : (
+                <AxisStrip
+                  kind="y"
+                  domain={paddedDomain(draws.draws[params[r]!] ?? [])}
+                  w={Y_AXIS_W}
+                  h={cell}
+                />
+              )}
               {params.map((colName, c) => {
                 if (c > r) {
                   // Upper triangle — blank by convention.
@@ -346,7 +403,7 @@ export function PairPlot({ draws, posterior, params }: PairPlotProps) {
                       spec={{
                         kind: 'diag',
                         values: draws.draws[rowName] ?? [],
-                        prior: draws.prior[rowName] ?? [],
+                        priorDensity: draws.prior_density?.[rowName] ?? null,
                         median: meta[r]!.median,
                         symbol: meta[r]!.symbol,
                       }}
@@ -370,7 +427,22 @@ export function PairPlot({ draws, posterior, params }: PairPlotProps) {
             </Row>
           ))}
 
-          {/* Bottom edge: empty corner, then one symbol under each column. */}
+          {/* Value x-axis strip: empty label + y-axis corners, then ticks
+              under each column (aligned to that column's data x-domain). */}
+          <div />
+          <div />
+          {params.map((colName, c) => (
+            <AxisStrip
+              key={colName}
+              kind="x"
+              domain={paddedDomain(draws.draws[params[c]!] ?? [])}
+              w={cell}
+              h={X_AXIS_H}
+            />
+          ))}
+
+          {/* Bottom edge: empty corners, then one symbol under each column. */}
+          <div />
           <div />
           {params.map((colName, c) => (
             <div

@@ -23,6 +23,9 @@ export type ObservedPoint = components['schemas']['ObservedPoint']
 export type TracesResponse = components['schemas']['TracesResponse']
 export type ParamTrace = components['schemas']['ParamTrace']
 export type TraceSeries = components['schemas']['TraceSeries']
+export type DiagnosticsResponse = components['schemas']['DiagnosticsResponse']
+export type ParamDiagnostic = components['schemas']['ParamDiagnostic']
+export type ChainMixing = components['schemas']['ChainMixing']
 
 /** The closed set of run lifecycle states the UI badges. */
 export type RunStatus =
@@ -129,5 +132,20 @@ export function getTraces(
   const id = encodeURIComponent(runId)
   return getJson<TracesResponse>(
     `/api/runs/${id}/traces?warmup_pct=${warmupPct}&max_points=${maxPoints}`,
+  )
+}
+
+/**
+ * Convergence diagnostics for the run at a given warm-up cutoff: camdl's
+ * authoritative verdict (findings) and R̂/ESS where a stage summary exists, else
+ * the watcher's live arviz estimate; plus per-chain mixing and the PMMH MAP.
+ */
+export function getDiagnostics(
+  runId: string,
+  warmupPct: number,
+): Promise<DiagnosticsResponse> {
+  const id = encodeURIComponent(runId)
+  return getJson<DiagnosticsResponse>(
+    `/api/runs/${id}/diagnostics?warmup_pct=${warmupPct}`,
   )
 }

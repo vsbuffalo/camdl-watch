@@ -37,6 +37,18 @@ def current_store() -> Path:
 app = FastAPI(title="camdl-watch", version="2.0.0-dev")
 
 
+@app.middleware("http")
+async def _no_cache_html(request, call_next):
+    """Serve the SPA shell (index.html) no-cache so a rebuilt frontend shows up
+    on a normal refresh — it references content-hashed assets, which stay
+    cacheable. Without this the browser pins a stale index.html and never sees
+    new builds."""
+    response = await call_next(request)
+    if response.headers.get("content-type", "").startswith("text/html"):
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    return response
+
+
 @app.get("/api/health")
 def health() -> dict:
     """Liveness + a cheap store summary, for the frontend's plumbing check.

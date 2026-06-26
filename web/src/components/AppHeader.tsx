@@ -62,14 +62,10 @@ export function AppHeader(props: AppHeaderProps) {
         <div className="flex items-center justify-between gap-4 py-2.5">
           <div className="flex shrink-0 items-center gap-2">
             <span className="size-3 shrink-0 bg-neutral-900" aria-hidden />
-            {/* Mobile: stack onto two tight lines so it never gets squished. */}
-            <span className="flex flex-col text-sm font-semibold leading-[0.95] tracking-tight text-neutral-900 sm:hidden">
+            {/* Two-line wordmark — stacked reads cleaner than camdl-watch inline. */}
+            <span className="flex flex-col text-sm font-semibold leading-[0.95] tracking-tight text-neutral-900">
               <span>camdl</span>
-              <span className="text-neutral-400">-watch</span>
-            </span>
-            {/* ≥sm: single-line wordmark. */}
-            <span className="hidden text-sm font-semibold tracking-tight text-neutral-900 sm:inline">
-              camdl<span className="text-neutral-400">-watch</span>
+              <span className="text-neutral-400">watch</span>
             </span>
           </div>
           <div className="flex min-w-0 flex-1 justify-end">

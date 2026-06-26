@@ -1,5 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import {
+  getDiagnostics,
   getDraws,
   getPosterior,
   getPredictive,
@@ -21,6 +22,8 @@ export const qk = {
   predictive: (id: string, stream: string) =>
     ['predictive', id, stream] as const,
   traces: (id: string, warmupPct: number) => ['traces', id, warmupPct] as const,
+  diagnostics: (id: string, warmupPct: number) =>
+    ['diagnostics', id, warmupPct] as const,
 }
 
 /** List of runs for the selector. Refetches occasionally so new fits appear. */
@@ -99,6 +102,20 @@ export function useTraces(runId: string | undefined, warmupPct: number) {
   return useQuery({
     queryKey: qk.traces(runId ?? '∅', warmupPct),
     queryFn: () => getTraces(runId as string, warmupPct),
+    enabled: Boolean(runId),
+    placeholderData: (prev) => prev,
+  })
+}
+
+/**
+ * Convergence diagnostics at a warm-up cutoff — the verdict (findings), the
+ * per-parameter R̂/ESS table, per-chain mixing, and the MAP. Recomputes when the
+ * cutoff moves, so it mirrors {@link usePosterior}'s warm-up dependence.
+ */
+export function useDiagnostics(runId: string | undefined, warmupPct: number) {
+  return useQuery({
+    queryKey: qk.diagnostics(runId ?? '∅', warmupPct),
+    queryFn: () => getDiagnostics(runId as string, warmupPct),
     enabled: Boolean(runId),
     placeholderData: (prev) => prev,
   })

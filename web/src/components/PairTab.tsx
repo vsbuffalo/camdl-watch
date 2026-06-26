@@ -27,17 +27,23 @@ export function PairTab({ runId }: { runId: string }) {
   const [selection, setSelection] = useState<Set<string>>(() => new Set())
   const initedRun = useRef<string | null>(null)
   useEffect(() => {
-    if (!groups || initedRun.current === runId) return
-    setSelection(new Set(groups.default_selection))
+    if (!groups || !draws.data || initedRun.current === runId) return
+    const objs = draws.data.objectives ?? []
+    const base = [...groups.default_selection]
+    if (objs.includes('log_posterior')) base.push('log_posterior')
+    setSelection(new Set(base))
     initedRun.current = runId
-  }, [groups, runId])
+  }, [groups, draws.data, runId])
 
-  // Render only the selected params, in the run's estimated order (draws.params).
-  const visibleParams = useMemo(
-    () =>
-      draws.data ? draws.data.params.filter((p) => selection.has(p)) : [],
-    [draws.data, selection],
-  )
+  // Render only the selected variables: estimated params first, then objectives
+  // (e.g. log_posterior / log_likelihood), in that order, filtered to the
+  // selection. The pair plot handles the objective columns as ordinary variables.
+  const visibleParams = useMemo(() => {
+    const candidates = draws.data
+      ? [...draws.data.params, ...draws.data.objectives]
+      : []
+    return candidates.filter((p) => selection.has(p))
+  }, [draws.data, selection])
 
   return (
     <Card
@@ -56,6 +62,7 @@ export function PairTab({ runId }: { runId: string }) {
       {groups && (
         <PairSettings
           groups={groups}
+          objectives={draws.data?.objectives ?? []}
           selection={selection}
           onChange={setSelection}
         />

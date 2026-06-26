@@ -178,10 +178,82 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/runs/{run_id}/diagnostics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Diagnostics
+         * @description Convergence diagnostics: camdl's authoritative verdict (findings) and
+         *     R̂/ESS where a stage summary exists, else the watcher's live arviz estimate;
+         *     plus per-chain mixing (acceptance / trajectory renewal) and the PMMH MAP.
+         */
+        get: operations["get_diagnostics_api_runs__run_id__diagnostics_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /**
+         * ChainMixing
+         * @description Per-chain mixing metric — MH/PMMH acceptance rate or PGAS trajectory
+         *     renewal — with an optional healthy band ``(lo, hi)``.
+         */
+        ChainMixing: {
+            /** Label */
+            label: string;
+            /** Values */
+            values: number[];
+            /** Band */
+            band?: [
+                number,
+                number
+            ] | null;
+        };
+        /**
+         * DiagnosticsResponse
+         * @description The full convergence picture for a run: camdl's verdict (findings), a
+         *     per-parameter R̂/ESS table, per-chain mixing, and the PMMH MAP if present.
+         *     ``source`` is ``camdl`` when an authoritative stage summary backs R̂/ESS, else
+         *     ``live`` (the watcher's arviz estimate while a run is still sampling).
+         */
+        DiagnosticsResponse: {
+            /** Run Id */
+            run_id: string;
+            /** Warmup Pct */
+            warmup_pct: number;
+            /** Warmup Cutoff */
+            warmup_cutoff: number;
+            /** N Tail */
+            n_tail: number;
+            /** N Chains */
+            n_chains: number;
+            /** Stage */
+            stage?: string | null;
+            /** Source */
+            source: string;
+            /** Logpost Label */
+            logpost_label: string;
+            /** Findings */
+            findings: components["schemas"]["FindingGroup"][];
+            /** Params */
+            params: components["schemas"]["ParamDiagnostic"][];
+            mixing?: components["schemas"]["ChainMixing"] | null;
+            /** Map Loglik */
+            map_loglik?: number | null;
+            /** Map Chain */
+            map_chain?: number | null;
+        };
         /**
          * DimensionInfo
          * @description One indexing dimension and its ordered levels (from the fit's ``schema``).
@@ -211,6 +283,11 @@ export interface components {
             n_draws: number;
             /** Params */
             params: string[];
+            /**
+             * Objectives
+             * @default []
+             */
+            objectives: string[];
             /** Chain */
             chain: number[];
             /** Draws */
@@ -223,6 +300,13 @@ export interface components {
              */
             prior: {
                 [key: string]: number[];
+            };
+            /**
+             * Prior Density
+             * @default {}
+             */
+            prior_density: {
+                [key: string]: components["schemas"]["PriorCurve"];
             };
         };
         /**
@@ -260,6 +344,38 @@ export interface components {
             };
             /** Value */
             value?: number | null;
+        };
+        /**
+         * ParamDiagnostic
+         * @description One parameter's convergence/precision diagnostics. R̂ and combined ESS are
+         *     camdl-authoritative when a stage summary exists, else the live arviz estimate;
+         *     tail-ESS / MCSE / sep are the live estimate. ``ess_per_chain`` is camdl's
+         *     per-chain breakdown (empty when unavailable). None where not estimable.
+         */
+        ParamDiagnostic: {
+            /** Name */
+            name: string;
+            /** Symbol */
+            symbol?: string | null;
+            /** Rhat */
+            rhat?: number | null;
+            /** Ess Bulk */
+            ess_bulk?: number | null;
+            /** Ess Tail */
+            ess_tail?: number | null;
+            /** Mcse */
+            mcse?: number | null;
+            /** Mean */
+            mean: number;
+            /** Sd */
+            sd: number;
+            /** Sep */
+            sep?: number | null;
+            /**
+             * Ess Per Chain
+             * @default []
+             */
+            ess_per_chain: number[];
         };
         /**
          * ParamFamily
@@ -415,6 +531,16 @@ export interface components {
             predictive: components["schemas"]["PredictivePoint"][];
             /** Observed */
             observed: components["schemas"]["ObservedPoint"][];
+        };
+        /**
+         * PriorCurve
+         * @description A smooth analytic prior density: ``y`` evaluated at grid ``x`` (same length).
+         */
+        PriorCurve: {
+            /** X */
+            x: number[];
+            /** Y */
+            y: number[];
         };
         /**
          * RunDetail
@@ -805,6 +931,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TracesResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_diagnostics_api_runs__run_id__diagnostics_get: {
+        parameters: {
+            query?: {
+                warmup_pct?: number;
+            };
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DiagnosticsResponse"];
                 };
             };
             /** @description Validation Error */
