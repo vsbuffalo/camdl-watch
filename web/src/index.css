@@ -1,0 +1,33 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica,
+    Arial, sans-serif;
+  --font-mono:
+    ui-monospace, "SF Mono", "JetBrains Mono", "Fira Code", Menlo, Consolas,
+    monospace;
+}
+
+html {
+  /* Slightly sub-16px root scales every rem-based size down a notch — a global
+     density lever for the terminal feel, including extra headroom on phones. */
+  font-size: 15px;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: #ffffff;
+  font-feature-settings: "cv11", "ss01";
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Observable Plot embeds inline styles; keep its SVG fluid within its column. */
+svg[class^="plot-"] {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}

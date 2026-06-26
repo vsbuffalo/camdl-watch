@@ -26,6 +26,9 @@ from pathlib import Path
 
 import numpy as np
 
+from .docs import ModelDocs
+from .schema import ObsSchema
+
 
 # Auxiliary (non-parameter) columns we recognize and pull out of the trace.
 # ``log_complete_data_ll`` is PGAS's joint log p(x,y|θ) along the resampled path
@@ -154,6 +157,11 @@ class RunMeta:
     declared_burn_in: int | None  # burn_in from fit.toml
     fit_toml_stem: str = ""  # config stem, e.g. natbc_dens_hierk_nc_pgas_long
     user_label: str | None = None  # camdl-native user-display label, if set
+    # Per-fit sidecar metadata (fit.meta.json). ``docs`` is the model's ``#'``
+    # documentation dictionary (empty when undocumented); ``schema`` is the
+    # observation/dimension schema (None when the sidecar carried no model).
+    docs: ModelDocs = field(default_factory=ModelDocs)
+    schema: ObsSchema | None = None
 
     @property
     def hash(self) -> str:

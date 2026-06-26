@@ -13,6 +13,8 @@ dependencies = [
     "scipy>=1.11",
     "pygments>=2.20.0",
     "defopt>=6.4",
+    "fastapi>=0.138.1",
+    "uvicorn[standard]>=0.49.0",
 ]
 
 [project.scripts]
@@ -32,3 +34,8 @@ packages = ["camdl_watch"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+]

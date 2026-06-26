@@ -45,6 +45,8 @@ import polars as pl
 
 import time
 
+from .docs import ModelDocs
+from .schema import ObsSchema
 from .state import (
     AUX_COLUMNS,
     ITER_COL,
@@ -482,6 +484,8 @@ def discover_runs(store: Path, *, include_warming: bool = False) -> list[RunMeta
                 declared_burn_in=int(burn_in) if burn_in is not None else None,
                 fit_toml_stem=_fit_toml_stem(meta, run_dir),
                 user_label=labels.get(run_dir.name),
+                docs=ModelDocs.from_meta(meta),
+                schema=ObsSchema.from_meta(meta),
             )
         )
     return out

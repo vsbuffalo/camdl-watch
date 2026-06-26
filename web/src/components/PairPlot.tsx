@@ -1,0 +1,423 @@
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import * as Plot from '@observablehq/plot'
+import type { DrawsResponse, PosteriorResponse } from '@/api/client'
+
+/**
+ * Subtle categorical palette for chains — muted 700-ish hues, not a rainbow.
+ * At low dot opacity these read as quiet tints; the point is to *detect*
+ * separation between chains (poor mixing), not to dazzle.
+ */
+const CHAIN_COLORS = [
+  '#475569', // slate-600
+  '#0f766e', // teal-700
+  '#b45309', // amber-700
+  '#9f1239', // rose-800
+  '#4338ca', // indigo-700
+  '#15803d', // green-700
+  '#7e22ce', // purple-700
+  '#a16207', // yellow-700
+] as const
+
+// Cell sizing: square cells clamp between these so few params fill the width
+// while many params shrink toward MIN and the grid scrolls.
+const MIN_CELL = 72
+const MAX_CELL = 200
+const LABEL_W = 26 // px gutter for the left row labels (rotated vertical, so narrow)
+
+const FRAME = '#e5e5e5' // neutral-200 — hairline cell border
+const POST_BAR = '#525252' // neutral-600 — posterior marginal (primary, darker)
+const PRIOR_FILL = '#d4d4d4' // neutral-300 — prior marginal (secondary, light)
+const PRIOR_STROKE = '#a3a3a3' // neutral-400 — prior step outline
+const MEDIAN = '#171717' // neutral-900
+const SYMBOL = '#525252' // neutral-600 — in-cell symbol
+
+type CellSpec =
+  | { kind: 'scatter'; x: number[]; y: number[]; chain: number[] }
+  | {
+      kind: 'diag'
+      values: number[]
+      prior: number[]
+      median: number | null
+      symbol: string
+    }
+
+function extent(xs: number[]): [number, number] {
+  let lo = Infinity
+  let hi = -Infinity
+  for (const x of xs) {
+    if (x < lo) lo = x
+    if (x > hi) hi = x
+  }
+  return [lo, hi]
+}
+
+function paddedDomain(xs: number[]): [number, number] | undefined {
+  const [lo, hi] = extent(xs)
+  if (!Number.isFinite(lo) || !Number.isFinite(hi) || lo === hi) return undefined
+  const pad = (hi - lo) * 0.04
+  return [lo - pad, hi + pad]
+}
+
+/** Linear-interpolated quantile of an already-sorted array. Display-only. */
+function quantileSorted(sorted: number[], q: number): number {
+  if (sorted.length === 0) return NaN
+  if (sorted.length === 1) return sorted[0]!
+  const idx = (sorted.length - 1) * q
+  const lo = Math.floor(idx)
+  const hi = Math.ceil(idx)
+  if (lo === hi) return sorted[lo]!
+  const t = idx - lo
+  return sorted[lo]! * (1 - t) + sorted[hi]! * t
+}
+
+/**
+ * Shared x-window for a diagonal cell: the posterior's full data range unioned
+ * with the prior's CENTRAL ~95% (2.5–97.5 pct), so a very broad prior sets a
+ * sensible window instead of flattening the posterior into a spike. This is a
+ * *drawing window*, computed inline purely for display — not a reported stat.
+ */
+function diagDomain(post: number[], prior: number[]): [number, number] | undefined {
+  let [lo, hi] = extent(post)
+  if (prior.length > 1) {
+    const sorted = [...prior].sort((a, b) => a - b)
+    const p025 = quantileSorted(sorted, 0.025)
+    const p975 = quantileSorted(sorted, 0.975)
+    if (Number.isFinite(p025)) lo = Math.min(lo, p025)
+    if (Number.isFinite(p975)) hi = Math.max(hi, p975)
+  }
+  if (!Number.isFinite(lo) || !Number.isFinite(hi) || lo === hi) return undefined
+  const pad = (hi - lo) * 0.04
+  return [lo - pad, hi + pad]
+}
+
+/** Evenly-spaced bin edges over a domain — shared by prior + posterior so the
+ *  two histograms bin identically and their heights are directly comparable. */
+function makeThresholds([d0, d1]: [number, number], nbins: number): number[] {
+  const step = (d1 - d0) / nbins
+  return Array.from({ length: nbins + 1 }, (_, i) => d0 + step * i)
+}
+
+/** One corner-plot cell: a scatter (lower) or a marginal histogram (diagonal). */
+function PairCell({
+  spec,
+  chainDomain,
+  size,
+}: {
+  spec: CellSpec
+  chainDomain: number[]
+  size: number
+}) {
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const el = ref.current
+    if (!el || size <= 0) return
+
+    const fontSize = Math.round(Math.max(9, Math.min(13, size / 14)))
+    const base = {
+      width: size,
+      height: size,
+      margin: 2,
+      style: { background: 'transparent' as const },
+      x: { axis: null },
+      y: { axis: null },
+    }
+
+    let node: ReturnType<typeof Plot.plot>
+    if (spec.kind === 'scatter') {
+      node = Plot.plot({
+        ...base,
+        x: { axis: null, domain: paddedDomain(spec.x) },
+        y: { axis: null, domain: paddedDomain(spec.y) },
+        color: { type: 'categorical', domain: chainDomain, range: CHAIN_COLORS },
+        marks: [
+          Plot.dot(spec.chain, {
+            x: (_d: number, i: number) => spec.x[i],
+            y: (_d: number, i: number) => spec.y[i],
+            fill: (d: number) => d,
+            r: 1.1,
+            fillOpacity: 0.25,
+            stroke: null,
+          }),
+          Plot.frame({ stroke: FRAME, strokeWidth: 0.5 }),
+        ],
+      })
+    } else {
+      const domain = diagDomain(spec.values, spec.prior)
+      // More room with bigger cells → a few more bins; clamp so it stays crisp.
+      const nbins = Math.max(14, Math.min(28, Math.round(size / 9)))
+      const marks: Plot.Markish[] = []
+
+      if (domain) {
+        const thresholds = makeThresholds(domain, nbins)
+        // Prior first (behind): light, clearly secondary. Clip to the window so
+        // a broad prior's tails don't renormalize the in-view bars away.
+        const priorVals = spec.prior.filter(
+          (v) => v >= domain[0] && v <= domain[1],
+        )
+        if (priorVals.length > 1) {
+          marks.push(
+            Plot.rectY(
+              priorVals,
+              Plot.binX<Plot.RectYOptions>(
+                { y: 'proportion' },
+                {
+                  x: (d: number) => d,
+                  thresholds,
+                  fill: PRIOR_FILL,
+                  fillOpacity: 0.6,
+                  stroke: PRIOR_STROKE,
+                  strokeWidth: 0.5,
+                  strokeOpacity: 0.7,
+                  insetLeft: 0.25,
+                  insetRight: 0.25,
+                },
+              ),
+            ),
+          )
+        }
+        // Posterior on top: darker solid bars. Same bins + `proportion` reducer
+        // ⇒ equal bin width ⇒ proportion ∝ density, height-comparable to prior.
+        marks.push(
+          Plot.rectY(
+            spec.values,
+            Plot.binX<Plot.RectYOptions>(
+              { y: 'proportion' },
+              {
+                x: (d: number) => d,
+                thresholds,
+                fill: POST_BAR,
+                fillOpacity: 0.82,
+                insetLeft: 0.5,
+                insetRight: 0.5,
+              },
+            ),
+          ),
+        )
+      }
+
+      if (spec.median != null) {
+        marks.push(Plot.ruleX([spec.median], { stroke: MEDIAN, strokeWidth: 1 }))
+      }
+      marks.push(
+        Plot.text([spec.symbol], {
+          frameAnchor: 'top-left',
+          dx: 3,
+          dy: 2,
+          fill: SYMBOL,
+          fontSize,
+          fontWeight: 600,
+        }),
+        Plot.frame({ stroke: FRAME, strokeWidth: 0.5 }),
+      )
+      node = Plot.plot({
+        ...base,
+        x: { axis: null, domain },
+        y: { axis: null },
+        marks,
+      })
+    }
+
+    el.replaceChildren(node)
+    return () => {
+      node.remove()
+    }
+  }, [spec, chainDomain, size])
+
+  return <div style={{ width: size, height: size }} ref={ref} />
+}
+
+interface PairPlotProps {
+  draws: DrawsResponse
+  posterior?: PosteriorResponse
+  /** Ordered, already-filtered visible params (the selection, in estimated order). */
+  params: string[]
+}
+
+/**
+ * Corner plot over the SELECTED parameters: lower-triangle bivariate scatter
+ * (colored by chain, doubling as a mixing check), diagonal marginals with a
+ * prior overlay, upper triangle left blank by convention. Correlations are NOT
+ * computed here — the stats stay in Python; this view shows the joint geometry
+ * (ridges, identifiability, chain separation) the marginals alone can't. Cells
+ * are sized to fill the container width and scroll only when they can't fit.
+ */
+export function PairPlot({ draws, posterior, params }: PairPlotProps) {
+  const n = params.length
+
+  const containerRef = useRef<HTMLDivElement>(null)
+  const [containerWidth, setContainerWidth] = useState(0)
+
+  // Measure the scroll container's visible width once on mount (seeded
+  // synchronously so cells draw on first paint, incl. headless capture) and on
+  // resize. One observer here drives every cell's size — cells don't self-measure.
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const measure = () => {
+      const w = Math.round(el.getBoundingClientRect().width)
+      if (w > 0) setContainerWidth(w)
+    }
+    measure()
+    const ro = new ResizeObserver(measure)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+
+  const cell = useMemo(() => {
+    if (n < 1 || containerWidth <= 0) return MIN_CELL
+    const avail = containerWidth - LABEL_W
+    return Math.max(MIN_CELL, Math.min(MAX_CELL, Math.floor(avail / n)))
+  }, [containerWidth, n])
+
+  const chainDomain = useMemo(
+    () => [...new Set(draws.chain)].sort((a, b) => a - b),
+    [draws.chain],
+  )
+
+  const meta = useMemo(() => {
+    const byName = new Map(
+      (posterior?.params ?? []).map((p) => [p.name, p] as const),
+    )
+    return params.map((name) => ({
+      symbol: byName.get(name)?.symbol ?? name,
+      median: byName.get(name)?.q50 ?? null,
+    }))
+  }, [params, posterior])
+
+  const anyPrior = useMemo(
+    () => params.some((p) => (draws.prior[p]?.length ?? 0) > 1),
+    [params, draws.prior],
+  )
+
+  const labelFs = Math.round(Math.max(11, Math.min(15, cell / 13)))
+
+  return (
+    // ALWAYS mount this outer measuring block — even when n<2 — so the ref is
+    // attached and the width is measured before the grid renders. (With cached
+    // data the grid mounts only after the selection populates; an early return
+    // here would let the measure effect run with no element and never re-fire,
+    // stranding the grid at MIN_CELL on tab re-entry.) Measure the OUTER block,
+    // not the inner overflow-x-auto box (which shrink-wraps to the grid).
+    <div ref={containerRef}>
+      {n < 2 ? (
+        <p className="text-sm text-neutral-500">
+          The pair plot needs at least two selected parameters — open{' '}
+          <span className="font-mono">⚙ params</span> to choose more.
+        </p>
+      ) : (
+        <div className="overflow-x-auto">
+          {anyPrior && <Legend />}
+          <div
+            className="grid gap-px"
+            style={{
+              width: 'max-content',
+              gridTemplateColumns: `${LABEL_W}px repeat(${n}, ${cell}px)`,
+              gridTemplateRows: `repeat(${n}, ${cell}px) auto`,
+            }}
+          >
+          {params.map((rowName, r) => (
+            // One matrix row: left symbol gutter, then N cells.
+            <Row key={rowName}>
+              <div
+                className="flex items-center justify-center font-medium text-neutral-500"
+                title={meta[r]!.symbol}
+              >
+                {/* rotate(-90deg) reads bottom-to-top (upright glyphs) — the
+                    conventional y-axis direction; `sideways-lr` isn't in Chrome. */}
+                <span
+                  className="whitespace-nowrap"
+                  style={{ fontSize: labelFs, transform: 'rotate(-90deg)' }}
+                >
+                  {meta[r]!.symbol}
+                </span>
+              </div>
+              {params.map((colName, c) => {
+                if (c > r) {
+                  // Upper triangle — blank by convention.
+                  return <div key={colName} />
+                }
+                if (c === r) {
+                  return (
+                    <PairCell
+                      key={colName}
+                      size={cell}
+                      chainDomain={chainDomain}
+                      spec={{
+                        kind: 'diag',
+                        values: draws.draws[rowName] ?? [],
+                        prior: draws.prior[rowName] ?? [],
+                        median: meta[r]!.median,
+                        symbol: meta[r]!.symbol,
+                      }}
+                    />
+                  )
+                }
+                return (
+                  <PairCell
+                    key={colName}
+                    size={cell}
+                    chainDomain={chainDomain}
+                    spec={{
+                      kind: 'scatter',
+                      x: draws.draws[colName] ?? [],
+                      y: draws.draws[rowName] ?? [],
+                      chain: draws.chain,
+                    }}
+                  />
+                )
+              })}
+            </Row>
+          ))}
+
+          {/* Bottom edge: empty corner, then one symbol under each column. */}
+          <div />
+          {params.map((colName, c) => (
+            <div
+              key={colName}
+              className="flex items-start justify-center overflow-hidden pt-1 font-medium text-neutral-500"
+              style={{ fontSize: labelFs }}
+            >
+              <span className="max-w-full truncate" title={meta[c]!.symbol}>
+                {meta[c]!.symbol}
+              </span>
+            </div>
+          ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** Minimal mono legend distinguishing the two diagonal histograms. */
+function Legend() {
+  return (
+    <div className="mb-2 flex items-center gap-3 font-mono text-[10px] text-neutral-400">
+      <span className="flex items-center gap-1.5">
+        <span
+          className="inline-block h-2 w-3 rounded-[1px]"
+          style={{ background: POST_BAR, opacity: 0.82 }}
+        />
+        posterior
+      </span>
+      <span className="text-neutral-300">·</span>
+      <span className="flex items-center gap-1.5">
+        <span
+          className="inline-block h-2 w-3 rounded-[1px] border"
+          style={{ background: PRIOR_FILL, borderColor: PRIOR_STROKE, opacity: 0.7 }}
+        />
+        prior
+      </span>
+    </div>
+  )
+}
+
+/**
+ * `display: contents` so each matrix row's children participate directly in the
+ * parent grid (auto-flow places them left-to-right) while still grouping under
+ * a stable React key.
+ */
+function Row({ children }: { children: ReactNode }) {
+  return <div style={{ display: 'contents' }}>{children}</div>
+}
