@@ -155,6 +155,48 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/runs/{run_id}/quantity-series/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Quantity Series
+         * @description One series quantity's banded trajectory (a ribbon). 404 if the run has no
+         *     such series quantity in its manifest, or its TSV is missing.
+         */
+        get: operations["get_quantity_series_api_runs__run_id__quantity_series__name__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/runs/{run_id}/quantity-scalars": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Quantity Scalars
+         * @description Every scalar quantity, one row per stratum cell — the quantities table.
+         *     Manifest-driven (stale orphan TSVs are ignored).
+         */
+        get: operations["get_quantity_scalars_api_runs__run_id__quantity_scalars_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/runs/{run_id}/traces": {
         parameters: {
             query?: never;
@@ -200,6 +242,34 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/compare": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Compare
+         * @description Prequential model comparison via the authoritative ``camdl compare``.
+         *
+         *     Resolves each run's ``prequential.json``, shells out (single source of truth
+         *     for the elpd / Δelpd math and the evidence scale), and projects the result.
+         *     Runs lacking a score artifact are dropped (reported in
+         *     ``missing_prequential``). When the surviving models were scored on different
+         *     horizons, camdl's commensurability guard trips: Δ columns come back ``None``
+         *     and ``commensurable`` is false (the caller may still pass
+         *     ``allow_mismatched_horizon`` to acknowledge it explicitly).
+         */
+        get: operations["compare_api_compare_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -219,6 +289,86 @@ export interface components {
                 number,
                 number
             ] | null;
+        };
+        /**
+         * CompareResponse
+         * @description A prequential model comparison. ``commensurable`` is false when the models
+         *     were scored on different horizons (``T_score`` mismatch) — Δ columns are then
+         *     meaningless and arrive ``None``. ``notes`` carries camdl's advisories (e.g.
+         *     the in-sample / plug-in optimism caveat). ``missing_prequential`` lists
+         *     requested runs that had no score artifact and were dropped. Rows are in
+         *     camdl's order: ascending Δelpd, best-supported last.
+         */
+        CompareResponse: {
+            /** Baseline */
+            baseline: string;
+            /** Metrics */
+            metrics: string[];
+            /** Commensurable */
+            commensurable: boolean;
+            /**
+             * Notes
+             * @default []
+             */
+            notes: string[];
+            /** Rows */
+            rows: components["schemas"]["CompareRow"][];
+            /**
+             * Missing Prequential
+             * @default []
+             */
+            missing_prequential: string[];
+        };
+        /**
+         * CompareRow
+         * @description One model's prequential scores in a comparison, projected from ``camdl
+         *     compare --format json``. Δ fields are ``None`` for the baseline row and when
+         *     the models are not commensurable (``T_score`` mismatch). ``elpd`` is the
+         *     summed out-of-sample log predictive density (higher = better); ``delta_elpd``
+         *     is paired against the baseline with ``se_delta_elpd``; ``e_t = exp(Δelpd)`` is
+         *     the terminal e-value / Bayes factor; ``evidence_label`` is the Jeffreys tier
+         *     of ``delta_elpd_db`` (decibans).
+         */
+        CompareRow: {
+            /** Run Id */
+            run_id: string;
+            /** Label */
+            label: string;
+            /** T Score */
+            t_score: number;
+            /** Elpd */
+            elpd: number;
+            /** Delta Elpd */
+            delta_elpd?: number | null;
+            /** Delta Elpd Db */
+            delta_elpd_db?: number | null;
+            /** Evidence Label */
+            evidence_label?: string | null;
+            /** E T */
+            e_t?: number | null;
+            /** Se Delta Elpd */
+            se_delta_elpd?: number | null;
+            /** Mean Crps */
+            mean_crps?: number | null;
+            /** Delta Mean Crps */
+            delta_mean_crps?: number | null;
+            /** Pit Cov90 */
+            pit_cov90?: number | null;
+            /**
+             * Is Baseline
+             * @default false
+             */
+            is_baseline: boolean;
+            /**
+             * Gap Is Real
+             * @default false
+             */
+            gap_is_real: boolean;
+            /**
+             * Overconfident
+             * @default false
+             */
+            overconfident: boolean;
         };
         /**
          * DiagnosticsResponse
@@ -543,6 +693,142 @@ export interface components {
             y: number[];
         };
         /**
+         * ProgressInfo
+         * @description camdl's per-run progress heartbeat (``progress.json``). ``phase`` /
+         *     ``step`` / ``total`` are present only while running; ``reason`` only on
+         *     failure; ``pct`` is the derived completion fraction (0–100) when step/total
+         *     are known. ``updated_at`` is unix seconds — its freshness is the liveness
+         *     signal.
+         */
+        ProgressInfo: {
+            /** State */
+            state: string;
+            /** Phase */
+            phase?: string | null;
+            /** Step */
+            step?: number | null;
+            /** Total */
+            total?: number | null;
+            /** Pct */
+            pct?: number | null;
+            /** Reason */
+            reason?: string | null;
+            /** Updated At */
+            updated_at?: number | null;
+        };
+        /**
+         * QuantityBandPoint
+         * @description One banded snapshot of a series quantity at a time × stratum.
+         */
+        QuantityBandPoint: {
+            /** Time */
+            time: number;
+            /**
+             * Stratum
+             * @default {}
+             */
+            stratum: {
+                [key: string]: string;
+            };
+            /** Q05 */
+            q05: number;
+            /** Q25 */
+            q25: number;
+            /** Q50 */
+            q50: number;
+            /** Q75 */
+            q75: number;
+            /** Q95 */
+            q95: number;
+        };
+        /**
+         * QuantityInfo
+         * @description A generated quantity's identity + shape, from the manifest — enough to
+         *     decide its rendering (``series`` → ribbon, ``scalar`` → table row) without
+         *     reading its TSV. ``censorable`` flags a scalar whose reduction can fail to
+         *     fire (a time-to-event), whose band is conditional on firing. ``unit`` is
+         *     reserved upstream but currently always null.
+         */
+        QuantityInfo: {
+            /** Name */
+            name: string;
+            /** Shape */
+            shape: string;
+            /** Source */
+            source: string;
+            /** Index Dims */
+            index_dims: string[];
+            /** Reduce */
+            reduce?: string | null;
+            /** Unit */
+            unit?: string | null;
+            /**
+             * Censorable
+             * @default false
+             */
+            censorable: boolean;
+        };
+        /**
+         * QuantityScalarRow
+         * @description One banded scalar quantity (one row per stratum cell). A censorable
+         *     scalar carries ``p_censored`` (fraction of draws where the event never
+         *     fired); a fully-censored cell has ``q* = None`` (no band, only the count).
+         */
+        QuantityScalarRow: {
+            /** Name */
+            name: string;
+            /** Reduce */
+            reduce?: string | null;
+            /** Source */
+            source: string;
+            /**
+             * Stratum
+             * @default {}
+             */
+            stratum: {
+                [key: string]: string;
+            };
+            /** N Draws */
+            n_draws: number;
+            /** P Censored */
+            p_censored?: number | null;
+            /** Q05 */
+            q05?: number | null;
+            /** Q25 */
+            q25?: number | null;
+            /** Q50 */
+            q50?: number | null;
+            /** Q75 */
+            q75?: number | null;
+            /** Q95 */
+            q95?: number | null;
+        };
+        /**
+         * QuantityScalarsResponse
+         * @description Every scalar quantity, one row per stratum cell — the quantities table.
+         */
+        QuantityScalarsResponse: {
+            /** Run Id */
+            run_id: string;
+            /** Rows */
+            rows: components["schemas"]["QuantityScalarRow"][];
+        };
+        /**
+         * QuantitySeriesResponse
+         * @description A series quantity's banded trajectory — the ribbon payload. Faceted by
+         *     ``stratum`` on the frontend (one panel per cell).
+         */
+        QuantitySeriesResponse: {
+            /** Run Id */
+            run_id: string;
+            /** Name */
+            name: string;
+            /** Index Dims */
+            index_dims: string[];
+            /** Points */
+            points: components["schemas"]["QuantityBandPoint"][];
+        };
+        /**
          * RunDetail
          * @description A run's metadata, schema, and verdict — everything but the draws.
          */
@@ -576,6 +862,11 @@ export interface components {
             findings: components["schemas"]["FindingGroup"][];
             /** Available Streams */
             available_streams: string[];
+            /**
+             * Available Quantities
+             * @default []
+             */
+            available_quantities: components["schemas"]["QuantityInfo"][];
         };
         /**
          * RunSummary
@@ -601,6 +892,12 @@ export interface components {
             n_params: number;
             /** Has Docs */
             has_docs: boolean;
+            progress?: components["schemas"]["ProgressInfo"] | null;
+            /**
+             * Has Prequential
+             * @default false
+             */
+            has_prequential: boolean;
             /** Max Iter */
             max_iter?: number | null;
             /** Updated At */
@@ -910,6 +1207,69 @@ export interface operations {
             };
         };
     };
+    get_quantity_series_api_runs__run_id__quantity_series__name__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QuantitySeriesResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_quantity_scalars_api_runs__run_id__quantity_scalars_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QuantityScalarsResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_traces_api_runs__run_id__traces_get: {
         parameters: {
             query?: {
@@ -964,6 +1324,40 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DiagnosticsResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    compare_api_compare_get: {
+        parameters: {
+            query: {
+                /** @description run ids to compare (≥2) */
+                runs: string[];
+                baseline?: string | null;
+                allow_mismatched_horizon?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CompareResponse"];
                 };
             };
             /** @description Validation Error */

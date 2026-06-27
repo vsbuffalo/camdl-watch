@@ -26,6 +26,13 @@ export type TraceSeries = components['schemas']['TraceSeries']
 export type DiagnosticsResponse = components['schemas']['DiagnosticsResponse']
 export type ParamDiagnostic = components['schemas']['ParamDiagnostic']
 export type ChainMixing = components['schemas']['ChainMixing']
+export type CompareResponse = components['schemas']['CompareResponse']
+export type CompareRow = components['schemas']['CompareRow']
+export type QuantityInfo = components['schemas']['QuantityInfo']
+export type QuantitySeriesResponse = components['schemas']['QuantitySeriesResponse']
+export type QuantityBandPoint = components['schemas']['QuantityBandPoint']
+export type QuantityScalarsResponse = components['schemas']['QuantityScalarsResponse']
+export type QuantityScalarRow = components['schemas']['QuantityScalarRow']
 
 /** The closed set of run lifecycle states the UI badges. */
 export type RunStatus =
@@ -148,4 +155,38 @@ export function getDiagnostics(
   return getJson<DiagnosticsResponse>(
     `/api/runs/${id}/diagnostics?warmup_pct=${warmupPct}`,
   )
+}
+
+/** Every scalar generated quantity for a run — the quantities table. */
+export function getQuantityScalars(
+  runId: string,
+): Promise<QuantityScalarsResponse> {
+  const id = encodeURIComponent(runId)
+  return getJson<QuantityScalarsResponse>(`/api/runs/${id}/quantity-scalars`)
+}
+
+/** One series generated quantity's banded trajectory (a ribbon). */
+export function getQuantitySeries(
+  runId: string,
+  name: string,
+): Promise<QuantitySeriesResponse> {
+  const id = encodeURIComponent(runId)
+  const n = encodeURIComponent(name)
+  return getJson<QuantitySeriesResponse>(`/api/runs/${id}/quantity-series/${n}`)
+}
+
+/**
+ * Prequential model comparison (elpd / Δelpd / CRPS / PIT) over ≥2 runs that
+ * carry a `prequential.json`, via the authoritative `camdl compare`. Optional
+ * `baseline` run id; `allowMismatchedHorizon` acknowledges a `T_score` mismatch.
+ */
+export function getCompare(
+  runIds: string[],
+  opts: { baseline?: string; allowMismatchedHorizon?: boolean } = {},
+): Promise<CompareResponse> {
+  const params = new URLSearchParams()
+  for (const id of runIds) params.append('runs', id)
+  if (opts.baseline) params.set('baseline', opts.baseline)
+  if (opts.allowMismatchedHorizon) params.set('allow_mismatched_horizon', 'true')
+  return getJson<CompareResponse>(`/api/compare?${params.toString()}`)
 }

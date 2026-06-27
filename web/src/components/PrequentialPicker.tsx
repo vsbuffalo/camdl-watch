@@ -1,0 +1,92 @@
+import type { RunSummary } from '@/api/client'
+import { StatusBadge } from '@/components/StatusBadge'
+import { cn } from '@/lib/utils'
+
+/**
+ * The Compare workspace's selector: only runs that carry a `prequential.json`
+ * are comparable, so the checklist shows those, and counts the rest as
+ * not-comparable rather than hiding why they're absent. Selection drives the
+ * `camdl compare` call.
+ */
+export function PrequentialPicker({
+  runs,
+  selected,
+  onToggle,
+  aliasOf,
+}: {
+  runs: RunSummary[]
+  selected: Set<string>
+  onToggle: (runId: string) => void
+  /** Alias (M1, M2, …) per selected run — shown as a ticker on its row. */
+  aliasOf: Map<string, string>
+}) {
+  const comparable = runs.filter((r) => r.has_prequential)
+  const others = runs.length - comparable.length
+
+  return (
+    <div className="border border-neutral-200">
+      <div className="flex items-center justify-between border-b border-neutral-100 px-3 py-2">
+        <span className="font-mono text-[11px] uppercase tracking-wide text-neutral-500">
+          Models to compare
+        </span>
+        <span className="font-mono text-[11px] tabular-nums text-neutral-400">
+          {selected.size} selected
+        </span>
+      </div>
+
+      {comparable.length === 0 ? (
+        <p className="px-3 py-4 text-sm leading-relaxed text-neutral-400">
+          No runs have a <code className="text-neutral-500">prequential.json</code>{' '}
+          yet. Score a pfilter stage (
+          <code className="text-neutral-500">camdl pfilter --save-prequential</code>
+          , or a <code className="text-neutral-500">fit run</code> with a pfilter
+          stage) to enable model comparison.
+        </p>
+      ) : (
+        <div className="max-h-64 overflow-y-auto">
+          {comparable.map((run) => {
+            const on = selected.has(run.run_id)
+            return (
+              <button
+                key={run.run_id}
+                type="button"
+                onClick={() => onToggle(run.run_id)}
+                aria-pressed={on}
+                className={cn(
+                  'flex w-full items-center gap-2.5 border-b border-neutral-100 px-3 py-1.5 text-left last:border-b-0 hover:bg-neutral-50',
+                  on && 'bg-blue-50/40',
+                )}
+              >
+                <span
+                  className={cn(
+                    'flex size-3.5 shrink-0 items-center justify-center border text-[9px] font-bold leading-none text-white',
+                    on ? 'border-blue-700 bg-blue-700' : 'border-neutral-300',
+                  )}
+                  aria-hidden
+                >
+                  {on ? '✓' : ''}
+                </span>
+                <StatusBadge status={run.status} />
+                <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-neutral-800">
+                  {run.label}
+                </span>
+                {on && (
+                  <span className="shrink-0 border border-neutral-300 px-1 font-mono text-[10px] font-medium leading-tight text-neutral-600">
+                    {aliasOf.get(run.run_id)}
+                  </span>
+                )}
+              </button>
+            )
+          })}
+        </div>
+      )}
+
+      {others > 0 && (
+        <div className="border-t border-neutral-100 px-3 py-1.5 font-mono text-[10px] text-neutral-400">
+          {others} run{others === 1 ? '' : 's'} without a prequential.json — not
+          comparable
+        </div>
+      )}
+    </div>
+  )
+}

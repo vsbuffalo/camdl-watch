@@ -21,9 +21,11 @@ from pathlib import Path
 import numpy as np
 from fastapi import APIRouter, HTTPException, Query
 
+from .. import compare as compare_mod
 from .. import diagnostics as diag_mod
 from .. import ingest
 from .. import predictive
+from .. import quantities as quantities_mod
 from ..grouping import group_params
 from ..highlight import HIGHLIGHT_CSS, highlight_camdl, highlight_toml
 from ..state import (
@@ -37,6 +39,8 @@ from ..state import (
 )
 from .models import (
     ChainMixing,
+    CompareResponse,
+    CompareRow,
     DiagnosticsResponse,
     DimensionInfo,
     DrawsResponse,
@@ -51,6 +55,12 @@ from .models import (
     PredictivePoint,
     PredictiveResponse,
     PriorCurve,
+    ProgressInfo,
+    QuantityBandPoint,
+    QuantityInfo,
+    QuantityScalarRow,
+    QuantityScalarsResponse,
+    QuantitySeriesResponse,
     RunDetail,
     RunSummary,
     SourceFile,
@@ -181,6 +191,23 @@ def _finite_or_none(x: float | None) -> float | None:
     return x if np.isfinite(x) else None
 
 
+def _progress_info(rs: RunState) -> ProgressInfo | None:
+    """Project camdl's ``progress.json`` heartbeat onto the wire, deriving a
+    completion ``pct`` when step/total are known. ``None`` when the run has no
+    heartbeat (older runs, or finished fits that never wrote one)."""
+    p = rs.progress
+    if p is None:
+        return None
+    pct: int | None = None
+    if p.step is not None and p.total:
+        pct = max(0, min(100, round(100.0 * p.step / p.total)))
+    return ProgressInfo(
+        state=p.state, phase=p.phase, step=p.step, total=p.total,
+        pct=pct, reason=p.reason,
+        updated_at=float(p.updated_at) if p.updated_at is not None else None,
+    )
+
+
 def _run_summary(meta: RunMeta, rs: RunState) -> RunSummary:
     return RunSummary(
         run_id=meta.run_id,
@@ -192,6 +219,8 @@ def _run_summary(meta: RunMeta, rs: RunState) -> RunSummary:
         n_chains=len(rs.chains),
         n_params=len(meta.estimated),
         has_docs=not meta.docs.is_empty(),
+        has_prequential=compare_mod.find_prequential(meta.run_dir) is not None,
+        progress=_progress_info(rs),
         max_iter=rs.max_iter(),
         updated_at=rs.updated_at,
     )
@@ -247,6 +276,14 @@ def _run_detail(meta: RunMeta, rs: RunState) -> RunDetail:
         # camdl writes predictive/observed at the FIT (run) dir level, not the
         # seed dir — read there.
         available_streams=predictive.discover_streams(meta.run_dir),
+        available_quantities=[
+            QuantityInfo(
+                name=q.name, shape=q.shape, source=q.source,
+                index_dims=q.index_dims, reduce=q.reduce, unit=q.unit,
+                censorable=q.censorable,
+            )
+            for q in quantities_mod.read_manifest(meta.run_dir)
+        ],
     )
 
 
@@ -428,13 +465,19 @@ def _sample_priors(rs: RunState, params: list[str], n: int = 2000) -> dict[str, 
 
 
 def _prior_curves(
-    rs: RunState, params: list[str], cols: dict[str, np.ndarray], n_grid: int = 80
+    rs: RunState,
+    params: list[str],
+    cols: dict[str, np.ndarray],
+    prior_samples: dict[str, list[float]],
+    n_grid: int = 160,
 ) -> dict[str, PriorCurve]:
-    """Smooth analytic prior density per param, evaluated over the param's
-    posterior window (its draws' padded extent) so it overlays the pair-plot
-    diagonal cleanly. A binned histogram of prior samples clipped to that window
-    reads as noise; the analytic density is exact and smooth. Flat/unbounded
-    priors (no informative shape) are skipped."""
+    """Smooth analytic prior density per param, evaluated over the union of the
+    posterior window and the prior's central 99% interval. The posterior part
+    overlays the diagonal in "fit to posterior" mode; the wider part gives "show
+    prior breadth" mode a curve to draw when the axis zooms out to the prior's
+    scale (the posterior then reads as a spike). A binned histogram of clipped
+    prior samples reads as noise; the analytic density is exact and smooth.
+    Flat/unbounded priors (no informative shape) are skipped."""
     out: dict[str, PriorCurve] = {}
     for p in params:
         spec = rs.priors.get(p)
@@ -446,6 +489,13 @@ def _prior_curves(
         lo, hi = float(np.min(arr)), float(np.max(arr))
         if not (np.isfinite(lo) and np.isfinite(hi)) or hi <= lo:
             continue
+        # Widen to the prior's central 99% so the breadth view has a curve to
+        # draw beyond the (tight) posterior window.
+        ps = np.asarray(prior_samples.get(p, []), dtype=float)
+        ps = ps[np.isfinite(ps)]
+        if ps.size:
+            lo = min(lo, float(np.quantile(ps, 0.005)))
+            hi = max(hi, float(np.quantile(ps, 0.995)))
         pad = (hi - lo) * 0.04
         grid = np.linspace(lo - pad, hi + pad, n_grid)
         dens = np.exp(ingest.log_prior_density(spec, grid))
@@ -485,7 +535,7 @@ def get_draws(
         run_id=run_id, warmup_pct=warmup_pct, warmup_cutoff=cutoff,
         n_draws=len(chain), params=params, objectives=objectives,
         chain=chain, draws={k: v.tolist() for k, v in cols.items()},
-        prior=prior, prior_density=_prior_curves(rs, params, cols),
+        prior=prior, prior_density=_prior_curves(rs, params, cols, prior),
     )
 
 
@@ -623,6 +673,91 @@ def get_predictive(run_id: str, stream: str) -> PredictiveResponse:
 
 
 # ---------------------------------------------------------------------------
+# Quantities tab (generated quantities — camdl fit predict's quantities/)
+# ---------------------------------------------------------------------------
+
+
+def _band_cell(v: object) -> float | None:
+    """A band quantile for the wire: ``None`` for an empty cell (a fully-censored
+    scalar writes blank q*), else the finite float."""
+    if v is None or v == "":
+        return None
+    return _finite_or_none(_fnum(v))
+
+
+def _stratum_of(row: dict, dims: list[str]) -> dict[str, str]:
+    return {d: str(row[d]) for d in dims if row.get(d) is not None}
+
+
+@router.get(
+    "/runs/{run_id}/quantity-series/{name}", response_model=QuantitySeriesResponse
+)
+def get_quantity_series(run_id: str, name: str) -> QuantitySeriesResponse:
+    """One series quantity's banded trajectory (a ribbon). 404 if the run has no
+    such series quantity in its manifest, or its TSV is missing."""
+    store = _store()
+    meta = _find_meta(store, run_id)
+    if meta is None:
+        raise HTTPException(status_code=404, detail=f"run not found: {run_id}")
+    qm = next(
+        (
+            q
+            for q in quantities_mod.read_manifest(meta.run_dir)
+            if q.name == name and q.shape == "series"
+        ),
+        None,
+    )
+    if qm is None:
+        raise HTTPException(status_code=404, detail=f"no series quantity: {name}")
+    df = quantities_mod.read_quantity(meta.run_dir, name)
+    if df is None:
+        raise HTTPException(status_code=404, detail=f"no data for quantity: {name}")
+    points = [
+        QuantityBandPoint(
+            time=_fnum(r.get("time")),
+            stratum=_stratum_of(r, qm.index_dims),
+            q05=_fnum(r.get("q05")), q25=_fnum(r.get("q25")), q50=_fnum(r.get("q50")),
+            q75=_fnum(r.get("q75")), q95=_fnum(r.get("q95")),
+        )
+        for r in df.iter_rows(named=True)
+    ]
+    return QuantitySeriesResponse(
+        run_id=run_id, name=name, index_dims=qm.index_dims, points=points
+    )
+
+
+@router.get("/runs/{run_id}/quantity-scalars", response_model=QuantityScalarsResponse)
+def get_quantity_scalars(run_id: str) -> QuantityScalarsResponse:
+    """Every scalar quantity, one row per stratum cell — the quantities table.
+    Manifest-driven (stale orphan TSVs are ignored)."""
+    store = _store()
+    meta = _find_meta(store, run_id)
+    if meta is None:
+        raise HTTPException(status_code=404, detail=f"run not found: {run_id}")
+    rows: list[QuantityScalarRow] = []
+    for qm in quantities_mod.read_manifest(meta.run_dir):
+        if qm.shape != "scalar":
+            continue
+        df = quantities_mod.read_quantity(meta.run_dir, qm.name)
+        if df is None:
+            continue
+        for r in df.iter_rows(named=True):
+            pc = r.get("p_censored")
+            rows.append(
+                QuantityScalarRow(
+                    name=qm.name, reduce=qm.reduce, source=qm.source,
+                    stratum=_stratum_of(r, qm.index_dims),
+                    n_draws=int(r.get("n_draws") or 0),
+                    p_censored=(_band_cell(pc) if pc is not None else None),
+                    q05=_band_cell(r.get("q05")), q25=_band_cell(r.get("q25")),
+                    q50=_band_cell(r.get("q50")), q75=_band_cell(r.get("q75")),
+                    q95=_band_cell(r.get("q95")),
+                )
+            )
+    return QuantityScalarsResponse(run_id=run_id, rows=rows)
+
+
+# ---------------------------------------------------------------------------
 # Traces tab
 # ---------------------------------------------------------------------------
 
@@ -688,6 +823,52 @@ def get_traces(
 # Diagnostics tab
 # ---------------------------------------------------------------------------
 
+_SEV_RANK = {"error": 0, "warn": 1, "info": 2}
+
+
+def _warning_kind(message: str) -> str:
+    """Collapse a live warning message to a finding ``kind`` for grouping."""
+    if "ESS" in message:
+        return "ess_low"
+    if "separated" in message:
+        return "chain_separation"
+    if "plateaued" in message:
+        return "loglik_not_plateaued"
+    if "divergent" in message:
+        return "divergent"
+    if "Too few" in message:
+        return "insufficient_draws"
+    if "No warnings" in message:
+        return "ok"
+    if ">" in message:  # the R̂ = x > thresh message
+        return "rhat_high"
+    return "diagnostic"
+
+
+def _live_findings(diag: diag_mod.Diagnostics, rs: RunState) -> list[FindingGroup]:
+    """Synthesize the verdict for a still-sampling run (no authoritative stage
+    summary) from the watcher's *live* diagnostics — so a running fit with bad
+    R̂/ESS/plateau shows real warnings instead of a falsely-green "no findings".
+    Mirrors :func:`summarize_findings`' one-line-per-kind collapse."""
+    warnings = diag_mod.derive_warnings(diag, rs, summary=None)
+    real = [w for w in warnings if "No warnings" not in w.message]
+    use = real if real else warnings
+    by_kind: dict[str, list] = {}
+    for w in use:
+        by_kind.setdefault(_warning_kind(w.message), []).append(w)
+    groups: list[FindingGroup] = []
+    for kind, ws in by_kind.items():
+        sev = min((w.severity.value for w in ws), key=lambda s: _SEV_RANK.get(s, 3))
+        headline = ws[0].message + (f"  (+{len(ws) - 1} more)" if len(ws) > 1 else "")
+        groups.append(
+            FindingGroup(
+                kind=kind, severity=sev, headline=headline,
+                params=[w.param for w in ws if w.param],
+            )
+        )
+    groups.sort(key=lambda g: _SEV_RANK.get(g.severity, 3))
+    return groups
+
 
 @router.get("/runs/{run_id}/diagnostics", response_model=DiagnosticsResponse)
 def get_diagnostics(
@@ -723,6 +904,10 @@ def get_diagnostics(
                 kind=g.kind, severity=g.severity.value,
                 headline=g.headline, params=list(g.params),
             ))
+    else:
+        # No authoritative summary yet (still sampling) — synthesize the verdict
+        # from live diagnostics so the strip isn't falsely green.
+        findings = _live_findings(diag, rs)
 
     params_out: list[ParamDiagnostic] = []
     for p in meta.estimated:
@@ -757,4 +942,109 @@ def get_diagnostics(
         findings=findings, params=params_out, mixing=mixing,
         map_loglik=(_finite_or_none(summ.map_loglik) if summ is not None else None),
         map_chain=(summ.map_chain if summ is not None else None),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Compare workspace
+# ---------------------------------------------------------------------------
+
+
+@router.get("/compare", response_model=CompareResponse)
+def compare(
+    runs: list[str] = Query(..., description="run ids to compare (≥2)"),
+    baseline: str | None = Query(default=None),
+    allow_mismatched_horizon: bool = Query(default=False),
+) -> CompareResponse:
+    """Prequential model comparison via the authoritative ``camdl compare``.
+
+    Resolves each run's ``prequential.json``, shells out (single source of truth
+    for the elpd / Δelpd math and the evidence scale), and projects the result.
+    Runs lacking a score artifact are dropped (reported in
+    ``missing_prequential``). When the surviving models were scored on different
+    horizons, camdl's commensurability guard trips: Δ columns come back ``None``
+    and ``commensurable`` is false (the caller may still pass
+    ``allow_mismatched_horizon`` to acknowledge it explicitly)."""
+    store = _store()
+    if not compare_mod.camdl_available():
+        raise HTTPException(
+            status_code=503,
+            detail="camdl binary not found on PATH — model comparison needs it.",
+        )
+
+    specs: list[compare_mod.CompareSpec] = []
+    labels: dict[str, str] = {}
+    missing: list[str] = []
+    for rid in runs:
+        meta = _find_meta(store, rid)
+        if meta is None:
+            raise HTTPException(status_code=404, detail=f"run not found: {rid}")
+        labels[rid] = meta.display_label
+        pq = compare_mod.find_prequential(meta.run_dir)
+        if pq is None:
+            missing.append(rid)
+            continue
+        specs.append(compare_mod.CompareSpec(name=rid, path=pq))
+
+    if len(specs) < 2:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "need ≥2 runs with a prequential.json to compare; "
+                f"have {len(specs)} (missing: {missing})"
+            ),
+        )
+    if baseline is not None and baseline not in {s.name for s in specs}:
+        raise HTTPException(
+            status_code=422,
+            detail=f"baseline '{baseline}' has no prequential.json among the selected runs",
+        )
+
+    try:
+        data, commensurable, notes = compare_mod.run_compare(
+            specs, baseline=baseline, allow_mismatched=allow_mismatched_horizon
+        )
+    except compare_mod.CompareError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+
+    base_name = data.get("baseline", "")
+    rows: list[CompareRow] = []
+    for r in data.get("rows", []):
+        name = r["name"]
+        d = r.get("delta_elpd")
+        se = r.get("se_delta_elpd")
+        pit = r.get("pit_cov90")
+        rows.append(
+            CompareRow(
+                run_id=name,
+                label=labels.get(name, name),
+                t_score=int(r["t_score"]),
+                elpd=_fnum(r.get("elpd")),
+                delta_elpd=_finite_or_none(d),
+                delta_elpd_db=_finite_or_none(r.get("delta_elpd_db")),
+                evidence_label=r.get("evidence_label"),
+                e_t=_finite_or_none(r.get("e_t")),
+                se_delta_elpd=_finite_or_none(se),
+                mean_crps=_finite_or_none(r.get("mean_crps")),
+                delta_mean_crps=_finite_or_none(r.get("delta_mean_crps")),
+                pit_cov90=_finite_or_none(pit),
+                is_baseline=(name == base_name),
+                gap_is_real=(
+                    d is not None and se not in (None, 0) and abs(d) > 2 * se
+                ),
+                overconfident=(pit is not None and pit < 0.70),
+            )
+        )
+
+    # `camdl compare --format json` emits rows in input order (only the table/md
+    # renderers sort). Present best-first by absolute elpd — the winner on top.
+    rows.sort(key=lambda r: r.elpd, reverse=True)
+
+    return CompareResponse(
+        baseline=base_name,
+        metrics=list(data.get("metrics", [])),
+        commensurable=commensurable,
+        notes=notes,
+        rows=rows,
+        missing_prequential=missing,
     )

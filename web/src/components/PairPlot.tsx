@@ -34,14 +34,24 @@ const PRIOR_STROKE = '#a3a3a3' // neutral-400 — prior step outline
 const MEDIAN = '#171717' // neutral-900
 const SYMBOL = '#525252' // neutral-600 — in-cell symbol
 
+type Domain = [number, number] | undefined
+
 type CellSpec =
-  | { kind: 'scatter'; x: number[]; y: number[]; chain: number[] }
+  | {
+      kind: 'scatter'
+      x: number[]
+      y: number[]
+      chain: number[]
+      xDomain: Domain
+      yDomain: Domain
+    }
   | {
       kind: 'diag'
       values: number[]
       priorDensity: { x: number[]; y: number[] } | null
       median: number | null
       symbol: string
+      domain: Domain
     }
 
 function extent(xs: number[]): [number, number] {
@@ -52,13 +62,6 @@ function extent(xs: number[]): [number, number] {
     if (x > hi) hi = x
   }
   return [lo, hi]
-}
-
-function paddedDomain(xs: number[]): [number, number] | undefined {
-  const [lo, hi] = extent(xs)
-  if (!Number.isFinite(lo) || !Number.isFinite(hi) || lo === hi) return undefined
-  const pad = (hi - lo) * 0.04
-  return [lo - pad, hi + pad]
 }
 
 /** Evenly-spaced bin edges over a domain — shared by prior + posterior so the
@@ -98,8 +101,8 @@ function PairCell({
     if (spec.kind === 'scatter') {
       node = Plot.plot({
         ...base,
-        x: { axis: null, domain: paddedDomain(spec.x) },
-        y: { axis: null, domain: paddedDomain(spec.y) },
+        x: { axis: null, domain: spec.xDomain },
+        y: { axis: null, domain: spec.yDomain },
         color: { type: 'categorical', domain: chainDomain, range: CHAIN_COLORS },
         marks: [
           Plot.dot(spec.chain, {
@@ -114,7 +117,7 @@ function PairCell({
         ],
       })
     } else {
-      const domain = paddedDomain(spec.values)
+      const domain = spec.domain
       // More room with bigger cells → a few more bins; clamp so it stays crisp.
       const nbins = Math.max(14, Math.min(28, Math.round(size / 9)))
       const marks: Plot.Markish[] = []
@@ -272,11 +275,16 @@ function AxisStrip({
   return <div style={{ width: w, height: h }} ref={ref} />
 }
 
+/** x-limit mode: `posterior` fits each axis to the draws; `prior` widens it to
+ *  the prior's breadth so the posterior reads as a spike inside the prior. */
+export type PriorXlimMode = 'posterior' | 'prior'
+
 interface PairPlotProps {
   draws: DrawsResponse
   posterior?: PosteriorResponse
   /** Ordered, already-filtered visible params (the selection, in estimated order). */
   params: string[]
+  priorXlimMode?: PriorXlimMode
 }
 
 /**
@@ -287,7 +295,12 @@ interface PairPlotProps {
  * (ridges, identifiability, chain separation) the marginals alone can't. Cells
  * are sized to fill the container width and scroll only when they can't fit.
  */
-export function PairPlot({ draws, posterior, params }: PairPlotProps) {
+export function PairPlot({
+  draws,
+  posterior,
+  params,
+  priorXlimMode = 'posterior',
+}: PairPlotProps) {
   const n = params.length
 
   const containerRef = useRef<HTMLDivElement>(null)
@@ -334,6 +347,32 @@ export function PairPlot({ draws, posterior, params }: PairPlotProps) {
     () => params.some((p) => (draws.prior_density?.[p]?.x.length ?? 0) > 1),
     [params, draws.prior_density],
   )
+
+  // One domain per dimension, reused for that param's column-x, row-y, axis
+  // strips, and diagonal — so every cell touching a param shares an axis. In
+  // `prior` mode the domain widens to the prior curve's extent (its breadth),
+  // so the posterior collapses to a spike inside the broad prior.
+  const domainOf = useMemo(() => {
+    const m = new Map<string, Domain>()
+    for (const p of params) {
+      const post = draws.draws[p] ?? []
+      const [lo, hi] = extent(post)
+      if (!Number.isFinite(lo) || !Number.isFinite(hi) || lo === hi) {
+        m.set(p, undefined)
+        continue
+      }
+      let d0 = lo
+      let d1 = hi
+      const pc = draws.prior_density?.[p]
+      if (priorXlimMode === 'prior' && pc && pc.x.length > 1) {
+        d0 = Math.min(d0, pc.x[0]!)
+        d1 = Math.max(d1, pc.x[pc.x.length - 1]!)
+      }
+      const pad = (d1 - d0) * 0.04 || Math.abs(d0) * 0.04 || 1
+      m.set(p, [d0 - pad, d1 + pad])
+    }
+    return m
+  }, [params, draws, priorXlimMode])
 
   const labelFs = Math.round(Math.max(11, Math.min(15, cell / 13)))
 
@@ -384,7 +423,7 @@ export function PairPlot({ draws, posterior, params }: PairPlotProps) {
               ) : (
                 <AxisStrip
                   kind="y"
-                  domain={paddedDomain(draws.draws[params[r]!] ?? [])}
+                  domain={domainOf.get(params[r]!)}
                   w={Y_AXIS_W}
                   h={cell}
                 />
@@ -406,6 +445,7 @@ export function PairPlot({ draws, posterior, params }: PairPlotProps) {
                         priorDensity: draws.prior_density?.[rowName] ?? null,
                         median: meta[r]!.median,
                         symbol: meta[r]!.symbol,
+                        domain: domainOf.get(rowName),
                       }}
                     />
                   )
@@ -420,6 +460,8 @@ export function PairPlot({ draws, posterior, params }: PairPlotProps) {
                       x: draws.draws[colName] ?? [],
                       y: draws.draws[rowName] ?? [],
                       chain: draws.chain,
+                      xDomain: domainOf.get(colName),
+                      yDomain: domainOf.get(rowName),
                     }}
                   />
                 )
@@ -435,7 +477,7 @@ export function PairPlot({ draws, posterior, params }: PairPlotProps) {
             <AxisStrip
               key={colName}
               kind="x"
-              domain={paddedDomain(draws.draws[params[c]!] ?? [])}
+              domain={domainOf.get(params[c]!)}
               w={cell}
               h={X_AXIS_H}
             />

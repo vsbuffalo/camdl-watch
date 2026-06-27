@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useDraws, usePosterior, useRun } from '@/api/queries'
-import { PairPlot } from '@/components/PairPlot'
+import { PairPlot, type PriorXlimMode } from '@/components/PairPlot'
 import { PairSettings } from '@/components/PairSettings'
 import { WarmupControl } from '@/components/WarmupControl'
 import { ForestSkeleton, MutedNotice } from '@/components/States'
@@ -14,6 +14,7 @@ const PAIR_MAX_DRAWS = 800
 
 export function PairTab({ runId }: { runId: string }) {
   const [warmupPct, setWarmupPct] = useState(DEFAULT_WARMUP_PCT)
+  const [priorXlimMode, setPriorXlimMode] = useState<PriorXlimMode>('posterior')
   const run = useRun(runId)
   const draws = useDraws(runId, warmupPct, PAIR_MAX_DRAWS)
   // Posterior summaries supply the diagonal median overlays and symbol labels.
@@ -44,6 +45,15 @@ export function PairTab({ runId }: { runId: string }) {
       : []
     return candidates.filter((p) => selection.has(p))
   }, [draws.data, selection])
+
+  // Any visible param carrying a prior curve → the breadth toggle is meaningful.
+  const anyPrior = useMemo(
+    () =>
+      visibleParams.some(
+        (p) => (draws.data?.prior_density?.[p]?.x.length ?? 0) > 1,
+      ),
+    [visibleParams, draws.data],
+  )
 
   return (
     <Card
@@ -88,13 +98,58 @@ export function PairTab({ runId }: { runId: string }) {
 
       {draws.data && draws.data.n_draws > 0 && (
         <div className="p-3">
+          {anyPrior && (
+            <div className="mb-2 flex items-center gap-2">
+              <span className="font-mono text-[10px] uppercase tracking-wide text-neutral-400">
+                x-axis
+              </span>
+              <XlimToggle value={priorXlimMode} onChange={setPriorXlimMode} />
+            </div>
+          )}
           <PairPlot
             draws={draws.data}
             posterior={posterior.data}
             params={visibleParams}
+            priorXlimMode={priorXlimMode}
           />
         </div>
       )}
     </Card>
+  )
+}
+
+/** Segmented control: fit each axis to the posterior, or widen it to show the
+ *  prior's breadth (the posterior then reads as a spike inside the prior). */
+function XlimToggle({
+  value,
+  onChange,
+}: {
+  value: PriorXlimMode
+  onChange: (m: PriorXlimMode) => void
+}) {
+  const opts: { v: PriorXlimMode; label: string }[] = [
+    { v: 'posterior', label: 'fit to posterior' },
+    { v: 'prior', label: 'show prior breadth' },
+  ]
+  return (
+    <div className="inline-flex border border-neutral-200">
+      {opts.map((o, i) => (
+        <button
+          key={o.v}
+          type="button"
+          onClick={() => onChange(o.v)}
+          aria-pressed={value === o.v}
+          className={cn(
+            'px-2 py-0.5 font-mono text-[11px] transition-colors',
+            i > 0 && 'border-l border-neutral-200',
+            value === o.v
+              ? 'bg-neutral-900 text-white'
+              : 'text-neutral-500 hover:text-neutral-800',
+          )}
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
   )
 }

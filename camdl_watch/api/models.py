@@ -113,6 +113,22 @@ class FindingGroup(BaseModel):
     params: list[str]
 
 
+class ProgressInfo(BaseModel):
+    """camdl's per-run progress heartbeat (``progress.json``). ``phase`` /
+    ``step`` / ``total`` are present only while running; ``reason`` only on
+    failure; ``pct`` is the derived completion fraction (0–100) when step/total
+    are known. ``updated_at`` is unix seconds — its freshness is the liveness
+    signal."""
+
+    state: str
+    phase: str | None = None
+    step: int | None = None
+    total: int | None = None
+    pct: int | None = None
+    reason: str | None = None
+    updated_at: float | None = None
+
+
 class RunSummary(BaseModel):
     """A run as it appears in the selector list — enough to identify, label, and
     badge it without fetching its draws."""
@@ -126,6 +142,12 @@ class RunSummary(BaseModel):
     n_chains: int
     n_params: int
     has_docs: bool
+    # camdl's live progress heartbeat, when present (burn-in/sweep step, or a
+    # failure reason) — drives the live progress blurb in the Explore header.
+    progress: ProgressInfo | None = None
+    # Whether the run has a prequential.json (a pfilter score artifact) — the
+    # gate for inclusion in the Compare workspace's model comparison.
+    has_prequential: bool = False
     max_iter: int | None = None
     updated_at: float
 
@@ -149,6 +171,22 @@ class ParamGroups(BaseModel):
     default_selection: list[str]
 
 
+class QuantityInfo(BaseModel):
+    """A generated quantity's identity + shape, from the manifest — enough to
+    decide its rendering (``series`` → ribbon, ``scalar`` → table row) without
+    reading its TSV. ``censorable`` flags a scalar whose reduction can fail to
+    fire (a time-to-event), whose band is conditional on firing. ``unit`` is
+    reserved upstream but currently always null."""
+
+    name: str
+    shape: str  # "series" | "scalar"
+    source: str  # "state" | "observations" | "derived"
+    index_dims: list[str]
+    reduce: str | None = None
+    unit: str | None = None
+    censorable: bool = False
+
+
 class RunDetail(BaseModel):
     """A run's metadata, schema, and verdict — everything but the draws."""
 
@@ -167,6 +205,9 @@ class RunDetail(BaseModel):
     dimensions: list[DimensionInfo]
     findings: list[FindingGroup]
     available_streams: list[str]
+    # Generated quantities the fit's predict produced (manifest-driven); empty
+    # when `camdl fit predict` was never run, or the model has no quantities block.
+    available_quantities: list[QuantityInfo] = []
 
 
 # --- Source tab --------------------------------------------------------------
@@ -234,6 +275,56 @@ class PredictiveResponse(BaseModel):
     observed: list[ObservedPoint]
 
 
+# --- Quantities tab ----------------------------------------------------------
+
+
+class QuantityBandPoint(BaseModel):
+    """One banded snapshot of a series quantity at a time × stratum."""
+
+    time: float
+    stratum: dict[str, str] = {}
+    q05: float
+    q25: float
+    q50: float
+    q75: float
+    q95: float
+
+
+class QuantitySeriesResponse(BaseModel):
+    """A series quantity's banded trajectory — the ribbon payload. Faceted by
+    ``stratum`` on the frontend (one panel per cell)."""
+
+    run_id: str
+    name: str
+    index_dims: list[str]
+    points: list[QuantityBandPoint]
+
+
+class QuantityScalarRow(BaseModel):
+    """One banded scalar quantity (one row per stratum cell). A censorable
+    scalar carries ``p_censored`` (fraction of draws where the event never
+    fired); a fully-censored cell has ``q* = None`` (no band, only the count)."""
+
+    name: str
+    reduce: str | None = None
+    source: str
+    stratum: dict[str, str] = {}
+    n_draws: int
+    p_censored: float | None = None
+    q05: float | None = None
+    q25: float | None = None
+    q50: float | None = None
+    q75: float | None = None
+    q95: float | None = None
+
+
+class QuantityScalarsResponse(BaseModel):
+    """Every scalar quantity, one row per stratum cell — the quantities table."""
+
+    run_id: str
+    rows: list[QuantityScalarRow]
+
+
 # --- Traces tab --------------------------------------------------------------
 
 
@@ -261,6 +352,53 @@ class TracesResponse(BaseModel):
     warmup_cutoff: int
     params: list[str]
     traces: list[ParamTrace]
+
+
+# --- Compare workspace -------------------------------------------------------
+
+
+class CompareRow(BaseModel):
+    """One model's prequential scores in a comparison, projected from ``camdl
+    compare --format json``. Δ fields are ``None`` for the baseline row and when
+    the models are not commensurable (``T_score`` mismatch). ``elpd`` is the
+    summed out-of-sample log predictive density (higher = better); ``delta_elpd``
+    is paired against the baseline with ``se_delta_elpd``; ``e_t = exp(Δelpd)`` is
+    the terminal e-value / Bayes factor; ``evidence_label`` is the Jeffreys tier
+    of ``delta_elpd_db`` (decibans)."""
+
+    run_id: str
+    label: str
+    t_score: int
+    elpd: float
+    delta_elpd: float | None = None
+    delta_elpd_db: float | None = None
+    evidence_label: str | None = None
+    e_t: float | None = None
+    se_delta_elpd: float | None = None
+    mean_crps: float | None = None
+    delta_mean_crps: float | None = None
+    pit_cov90: float | None = None
+    is_baseline: bool = False
+    # |Δelpd| > 2·se(Δ) — camdl's "the gap is real" rule of thumb.
+    gap_is_real: bool = False
+    # PIT 90%-coverage < 0.70 — the overconfidence flag.
+    overconfident: bool = False
+
+
+class CompareResponse(BaseModel):
+    """A prequential model comparison. ``commensurable`` is false when the models
+    were scored on different horizons (``T_score`` mismatch) — Δ columns are then
+    meaningless and arrive ``None``. ``notes`` carries camdl's advisories (e.g.
+    the in-sample / plug-in optimism caveat). ``missing_prequential`` lists
+    requested runs that had no score artifact and were dropped. Rows are in
+    camdl's order: ascending Δelpd, best-supported last."""
+
+    baseline: str
+    metrics: list[str]
+    commensurable: bool
+    notes: list[str] = []
+    rows: list[CompareRow]
+    missing_prequential: list[str] = []
 
 
 # --- Diagnostics tab ---------------------------------------------------------

@@ -1,9 +1,12 @@
 import { useQuery } from '@tanstack/react-query'
 import {
+  getCompare,
   getDiagnostics,
   getDraws,
   getPosterior,
   getPredictive,
+  getQuantityScalars,
+  getQuantitySeries,
   getRun,
   getRuns,
   getSource,
@@ -55,6 +58,25 @@ export function usePosterior(runId: string | undefined, warmupPct: number) {
 }
 
 /**
+ * Prequential model comparison over a set of runs (sorted key so selection
+ * order doesn't thrash the cache). Disabled until ≥2 runs are chosen; a
+ * `T_score` refusal still resolves (with `commensurable: false`), so only a
+ * genuine backend error surfaces as `isError`.
+ */
+export function useCompare(
+  runIds: string[],
+  opts: { baseline?: string; allowMismatchedHorizon?: boolean } = {},
+) {
+  const key = [...runIds].sort()
+  return useQuery({
+    queryKey: ['compare', key, opts.baseline ?? null, Boolean(opts.allowMismatchedHorizon)],
+    queryFn: () => getCompare(runIds, opts),
+    enabled: runIds.length >= 2,
+    placeholderData: (prev) => prev,
+  })
+}
+
+/**
  * Row-aligned posterior draws for the marginal densities and pair plot.
  * `maxDraws` defaults to the Posterior tab's cap; the Pair tab passes a
  * smaller one to keep the scatter panels light.
@@ -68,6 +90,29 @@ export function useDraws(
     queryKey: qk.draws(runId ?? '∅', warmupPct, maxDraws),
     queryFn: () => getDraws(runId as string, warmupPct, maxDraws),
     enabled: Boolean(runId),
+    placeholderData: (prev) => prev,
+  })
+}
+
+/** All scalar generated quantities for a run (the quantities table). */
+export function useQuantityScalars(runId: string | undefined) {
+  return useQuery({
+    queryKey: ['quantity-scalars', runId ?? '∅'],
+    queryFn: () => getQuantityScalars(runId as string),
+    enabled: Boolean(runId),
+    placeholderData: (prev) => prev,
+  })
+}
+
+/** One series generated quantity's banded trajectory (a ribbon). */
+export function useQuantitySeries(
+  runId: string | undefined,
+  name: string | undefined,
+) {
+  return useQuery({
+    queryKey: ['quantity-series', runId ?? '∅', name ?? '∅'],
+    queryFn: () => getQuantitySeries(runId as string, name as string),
+    enabled: Boolean(runId && name),
     placeholderData: (prev) => prev,
   })
 }
