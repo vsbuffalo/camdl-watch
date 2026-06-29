@@ -1,15 +1,13 @@
 [project]
 name = "camdl-watch"
 version = "0.1.0"
-description = "Live MCMC-diagnostics dashboard for camdl fits"
+description = "Browser-based results viewer and live diagnostics for camdl fits"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "shiny>=1.0",
     "arviz>=0.18",
     "polars>=1.0",
     "numpy>=1.26",
-    "matplotlib>=3.8",
     "scipy>=1.11",
     "pygments>=2.20.0",
     "defopt>=6.4",

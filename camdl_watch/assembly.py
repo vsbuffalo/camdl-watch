@@ -1,0 +1,59 @@
+"""Run-state assembly + status classification — the shiny-free core the API and
+the tests share.
+
+``build_run_state(meta)`` tail-reads a run's chains and attaches its priors /
+progress / authoritative summary, then ``classify(rs, now)`` tags it
+``running | warming | done | failed | stalled`` from camdl's ``progress.json``
+heartbeat (terminal states win; a fresh ``running`` beat is live) or, absent a
+heartbeat, the seed ``.lock`` PID plus whether any draws exist.
+"""
+
+from __future__ import annotations
+
+import time
+
+from . import ingest
+from .state import ChainBuffer, RunMeta, RunState, Status
+
+
+def classify(rs: RunState, now: float) -> Status:
+    """Status from camdl's ``progress.json`` heartbeat when present (terminal
+    states win regardless of freshness; a fresh ``running`` beat is live), else
+    the ``.lock`` PID + presence of draws."""
+    prog = rs.progress
+    if prog is not None:
+        if prog.state == "done":
+            return Status.DONE
+        if prog.state == "failed":
+            return Status.FAILED
+        if prog.state == "running":
+            if not ingest.progress_is_fresh(prog, now):
+                return Status.STALLED
+            return Status.WARMING if prog.phase == "burn_in" else Status.RUNNING
+        return Status.DONE
+    live = ingest.stage_is_live(rs.meta.posterior_dir)
+    has_draws = any(buf.n for buf in rs.chains.values())
+    if has_draws:
+        return Status.RUNNING if live else Status.DONE
+    return Status.WARMING if live else Status.STALLED
+
+
+def build_run_state(meta: RunMeta) -> RunState:
+    """Assemble a full :class:`RunState` for one run: tail-read every chain from
+    offset 0, attach priors / progress / authoritative summary, and classify."""
+    rs = RunState(meta=meta)
+    max_mtime = 0.0
+    for cid, path in meta.chain_paths.items():
+        buf = ChainBuffer(cid=cid, path=path)
+        ingest.tail_chain(buf)  # full read from offset 0
+        rs.chains[cid] = buf
+        try:
+            max_mtime = max(max_mtime, path.stat().st_mtime)
+        except OSError:
+            pass
+    rs.priors = ingest.extract_priors(meta)
+    rs.progress = ingest.read_progress(meta.posterior_dir)
+    rs.summary = ingest.read_chain_summary(meta.posterior_dir)
+    rs.updated_at = max_mtime
+    rs.status = classify(rs, time.time())
+    return rs

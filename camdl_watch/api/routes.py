@@ -15,7 +15,6 @@ later optimization, not a correctness requirement.
 from __future__ import annotations
 
 import json
-import time
 from pathlib import Path
 
 import numpy as np
@@ -26,16 +25,15 @@ from .. import diagnostics as diag_mod
 from .. import ingest
 from .. import predictive
 from .. import quantities as quantities_mod
+from ..assembly import build_run_state
 from ..grouping import group_params
 from ..highlight import HIGHLIGHT_CSS, highlight_camdl, highlight_toml
 from ..state import (
     AUX_COLUMNS,
-    ChainBuffer,
     PriorFamily,
     PriorSpec,
     RunMeta,
     RunState,
-    Status,
 )
 from .models import (
     ChainMixing,
@@ -87,54 +85,6 @@ def _store() -> Path:
 # ---------------------------------------------------------------------------
 # Run-state assembly (server-side; never shipped raw)
 # ---------------------------------------------------------------------------
-
-
-def _classify(rs: RunState, now: float) -> Status:
-    """Status from camdl's ``progress.json`` heartbeat when present (terminal
-    states win regardless of freshness; a fresh ``running`` beat is live), else
-    the ``.lock`` PID + presence of draws.
-
-    NOTE: replicated verbatim from ``camdl_watch.app._classify`` — that module
-    imports ``shiny``, so the API layer cannot import it. Candidate to extract
-    into a shiny-free status helper and share; keep the two in sync until then.
-    """
-    prog = rs.progress
-    if prog is not None:
-        if prog.state == "done":
-            return Status.DONE
-        if prog.state == "failed":
-            return Status.FAILED
-        if prog.state == "running":
-            if not ingest.progress_is_fresh(prog, now):
-                return Status.STALLED
-            return Status.WARMING if prog.phase == "burn_in" else Status.RUNNING
-        return Status.DONE
-    live = ingest.stage_is_live(rs.meta.posterior_dir)
-    has_draws = any(buf.n for buf in rs.chains.values())
-    if has_draws:
-        return Status.RUNNING if live else Status.DONE
-    return Status.WARMING if live else Status.STALLED
-
-
-def _build_run_state(meta: RunMeta) -> RunState:
-    """Assemble a full :class:`RunState` for one run: tail-read every chain from
-    offset 0, attach priors / progress / authoritative summary, and classify."""
-    rs = RunState(meta=meta)
-    max_mtime = 0.0
-    for cid, path in meta.chain_paths.items():
-        buf = ChainBuffer(cid=cid, path=path)
-        ingest.tail_chain(buf)  # full read from offset 0
-        rs.chains[cid] = buf
-        try:
-            max_mtime = max(max_mtime, path.stat().st_mtime)
-        except OSError:
-            pass
-    rs.priors = ingest.extract_priors(meta)
-    rs.progress = ingest.read_progress(meta.posterior_dir)
-    rs.summary = ingest.read_chain_summary(meta.posterior_dir)
-    rs.updated_at = max_mtime
-    rs.status = _classify(rs, time.time())
-    return rs
 
 
 def _warmup_cutoff(rs: RunState, warmup_pct: int) -> int:
@@ -409,7 +359,7 @@ def list_runs() -> list[RunSummary]:
     """Every discoverable run, newest first by last-written chain mtime."""
     store = _store()
     summaries = [
-        _run_summary(meta, _build_run_state(meta))
+        _run_summary(meta, build_run_state(meta))
         for meta in ingest.discover_runs(store, include_warming=True)
     ]
     summaries.sort(key=lambda s: s.updated_at, reverse=True)
@@ -423,7 +373,7 @@ def get_run(run_id: str) -> RunDetail:
     meta = _find_meta(store, run_id)
     if meta is None:
         raise HTTPException(status_code=404, detail=f"run not found: {run_id}")
-    return _run_detail(meta, _build_run_state(meta))
+    return _run_detail(meta, build_run_state(meta))
 
 
 @router.get("/runs/{run_id}/posterior", response_model=PosteriorResponse)
@@ -437,7 +387,7 @@ def get_posterior(
     meta = _find_meta(store, run_id)
     if meta is None:
         raise HTTPException(status_code=404, detail=f"run not found: {run_id}")
-    rs = _build_run_state(meta)
+    rs = build_run_state(meta)
     cutoff = _warmup_cutoff(rs, warmup_pct)
     if rs.max_iter() is None:  # warming up — no draws to summarize
         return PosteriorResponse(
@@ -530,7 +480,7 @@ def get_draws(
     meta = _find_meta(store, run_id)
     if meta is None:
         raise HTTPException(status_code=404, detail=f"run not found: {run_id}")
-    rs = _build_run_state(meta)
+    rs = build_run_state(meta)
     cutoff = _warmup_cutoff(rs, warmup_pct)
     params = list(meta.estimated)
     prior = _sample_priors(rs, params)
@@ -795,7 +745,7 @@ def get_traces(
     meta = _find_meta(store, run_id)
     if meta is None:
         raise HTTPException(status_code=404, detail=f"run not found: {run_id}")
-    rs = _build_run_state(meta)
+    rs = build_run_state(meta)
     cutoff = _warmup_cutoff(rs, warmup_pct)
 
     objectives = [
@@ -900,7 +850,7 @@ def get_diagnostics(
     meta = _find_meta(store, run_id)
     if meta is None:
         raise HTTPException(status_code=404, detail=f"run not found: {run_id}")
-    rs = _build_run_state(meta)
+    rs = build_run_state(meta)
     cutoff = _warmup_cutoff(rs, warmup_pct)
     summ = rs.summary
     base = dict(
