@@ -236,6 +236,47 @@ function HorizonChecks({
   )
 }
 
+/** Multi-select scenario checkboxes with colored labels (overlay axis). */
+function ScenarioChecks({
+  options,
+  selected,
+  colorOf,
+  onToggle,
+}: {
+  options: readonly string[]
+  selected: readonly string[]
+  colorOf: (s: string) => string
+  onToggle: (s: string) => void
+}) {
+  return (
+    <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+      <span className="text-[10px] font-medium uppercase tracking-wider text-neutral-400">
+        Scenario
+      </span>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        {options.map((opt) => {
+          const on = selected.includes(opt)
+          return (
+            <label
+              key={opt}
+              className="flex cursor-pointer items-center gap-1.5 font-mono text-xs"
+            >
+              <input
+                type="checkbox"
+                checked={on}
+                onChange={() => onToggle(opt)}
+                className="size-3"
+                style={{ accentColor: colorOf(opt) }}
+              />
+              <span className={on ? 'text-neutral-900' : 'text-neutral-500'}>{opt}</span>
+            </label>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 /** Swatch legend mapping each overlaid arm (+ observed) to its colour. */
 function Legend({ arms }: { arms: { label: string; color: string }[] }) {
   return (
@@ -279,6 +320,7 @@ export function PredictiveTab({ runId }: { runId: string }) {
   )
 
   const [selected, setSelected] = useState<readonly string[] | null>(null)
+  const [selectedScenarios, setSelectedScenarios] = useState<readonly string[] | null>(null)
   const [treatment, setTreatment] = useState<string>()
 
   const horizons = data?.horizons ?? []
@@ -296,11 +338,23 @@ export function PredictiveTab({ runId }: { runId: string }) {
     return horizons.filter((h) => set.has(h))
   }, [selected, horizons])
 
+  const activeScenarios = useMemo(() => {
+    const set = new Set(selectedScenarios ?? scenarios)
+    return scenarios.filter((s) => set.has(s))
+  }, [selectedScenarios, scenarios])
+
   const toggleHorizon = (h: string) =>
     setSelected(
       selectedHorizons.includes(h)
         ? selectedHorizons.filter((x) => x !== h)
         : [...selectedHorizons, h],
+    )
+
+  const toggleScenario = (s: string) =>
+    setSelectedScenarios(
+      activeScenarios.includes(s)
+        ? activeScenarios.filter((x) => x !== s)
+        : [...activeScenarios, s],
     )
 
   const treatments = data?.treatments ?? []
@@ -324,6 +378,7 @@ export function PredictiveTab({ runId }: { runId: string }) {
     }
 
     const wanted = new Set(selectedHorizons)
+    const wantedScenarios = new Set(activeScenarios)
     const groups = new Map<
       string,
       {
@@ -334,6 +389,7 @@ export function PredictiveTab({ runId }: { runId: string }) {
     >()
     for (const p of data.predictive) {
       if (!wanted.has(p.horizon)) continue
+      if (byScenario && !wantedScenarios.has(p.scenario)) continue
       if (needTreatment && p.treatment !== activeTreatment) continue
       const key = JSON.stringify(p.stratum)
       let g = groups.get(key)
@@ -359,7 +415,15 @@ export function PredictiveTab({ runId }: { runId: string }) {
       })),
       obs: obsByKey.get(g.key) ?? [],
     }))
-  }, [data, selectedHorizons, needTreatment, activeTreatment, byScenario, scenarioColors])
+  }, [
+    data,
+    selectedHorizons,
+    activeScenarios,
+    needTreatment,
+    activeTreatment,
+    byScenario,
+    scenarioColors,
+  ])
 
   // Legend arms: scenarios actually shown (in canonical order) when overlaying
   // scenarios, else the checked horizons.
@@ -412,8 +476,17 @@ export function PredictiveTab({ runId }: { runId: string }) {
             onChange={(v) => {
               setStream(v)
               setSelected(null)
+              setSelectedScenarios(null)
               setTreatment(undefined)
             }}
+          />
+        )}
+        {byScenario && (
+          <ScenarioChecks
+            options={scenarios}
+            selected={activeScenarios}
+            colorOf={(s) => scenarioColors.get(s) ?? SCENARIO_REFERENCE}
+            onToggle={toggleScenario}
           />
         )}
         {horizons.length > 1 && (

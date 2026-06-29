@@ -185,6 +185,10 @@ class QuantityInfo(BaseModel):
     reduce: str | None = None
     unit: str | None = None
     censorable: bool = False
+    # `#'` docs joined from the fit's docs.quantities, when the model carries them.
+    symbol: str | None = None
+    description: str | None = None
+    reference: str | None = None
 
 
 class RunDetail(BaseModel):

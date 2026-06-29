@@ -782,6 +782,12 @@ export interface components {
              * @default false
              */
             censorable: boolean;
+            /** Symbol */
+            symbol?: string | null;
+            /** Description */
+            description?: string | null;
+            /** Reference */
+            reference?: string | null;
         };
         /**
          * QuantityScalarRow

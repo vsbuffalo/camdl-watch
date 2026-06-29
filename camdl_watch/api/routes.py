@@ -226,6 +226,19 @@ def _run_summary(meta: RunMeta, rs: RunState) -> RunSummary:
     )
 
 
+def _quantity_info(q: quantities_mod.QuantityMeta, meta: RunMeta) -> QuantityInfo:
+    """A logical quantity for the wire, joined with its ``#'`` docs (symbol /
+    description / citation) when the model carries them — exactly like params."""
+    db = meta.docs.for_quantity(q.name)
+    return QuantityInfo(
+        name=q.name, shape=q.shape, source=q.source, index_dims=q.index_dims,
+        reduce=q.reduce, unit=q.unit, censorable=q.censorable,
+        symbol=(db.symbol if db else None),
+        description=(db.text if db else None),
+        reference=(db.reference if db else None),
+    )
+
+
 def _run_detail(meta: RunMeta, rs: RunState) -> RunDetail:
     schema = meta.schema
     streams = [
@@ -278,12 +291,7 @@ def _run_detail(meta: RunMeta, rs: RunState) -> RunDetail:
         # seed dir — read there.
         available_streams=predictive.discover_streams(meta.run_dir),
         available_quantities=[
-            QuantityInfo(
-                name=q.name, shape=q.shape, source=q.source,
-                index_dims=q.index_dims, reduce=q.reduce, unit=q.unit,
-                censorable=q.censorable,
-            )
-            for q in _quantity_manifest.quantities
+            _quantity_info(q, meta) for q in _quantity_manifest.quantities
         ],
         quantity_scenarios=_quantity_manifest.scenarios,
     )

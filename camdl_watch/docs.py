@@ -66,6 +66,7 @@ class ModelDocs:
     transitions: dict[str, DocBlock] = field(default_factory=dict)
     observations: dict[str, DocBlock] = field(default_factory=dict)
     dimensions: dict[str, DocBlock] = field(default_factory=dict)
+    quantities: dict[str, DocBlock] = field(default_factory=dict)
 
     @classmethod
     def from_meta(cls, meta: dict) -> "ModelDocs":
@@ -99,6 +100,7 @@ class ModelDocs:
             transitions=category("transitions"),
             observations=category("observations"),
             dimensions=category("dimensions"),
+            quantities=category("quantities"),
         )
 
     def is_empty(self) -> bool:
@@ -108,7 +110,14 @@ class ModelDocs:
             or self.transitions
             or self.observations
             or self.dimensions
+            or self.quantities
         )
+
+    def for_quantity(self, name: str) -> DocBlock | None:
+        """Resolve a generated-quantity name to its :class:`DocBlock` (exact
+        match — quantities aren't index-expanded like params). ``None`` if
+        undocumented."""
+        return self.quantities.get(name)
 
     def for_param(self, coord: str) -> DocBlock | None:
         """Resolve an estimated *coordinate* to its parameter :class:`DocBlock`.

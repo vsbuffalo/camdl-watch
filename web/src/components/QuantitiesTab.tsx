@@ -168,16 +168,35 @@ function SeriesQuantity({
     }))
   }, [data, colorOf])
 
+  const hasSymbol = Boolean(q.symbol && q.symbol !== q.name)
   return (
     <Card className="overflow-hidden">
-      <div className="flex items-baseline gap-2 px-3 py-2">
-        <span className="font-mono text-sm font-semibold text-neutral-900">{q.name}</span>
+      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 px-3 py-2">
+        <span className="text-sm font-semibold text-neutral-900">
+          {q.symbol ?? q.name}
+        </span>
+        {hasSymbol && (
+          <span className="font-mono text-[11px] font-medium text-neutral-400">
+            {q.name}
+          </span>
+        )}
         {tag && (
           <span className="font-mono text-[10px] uppercase tracking-wide text-neutral-400">
             {tag}
           </span>
         )}
-        <span className="font-mono text-[10px] text-neutral-400">banded over draws</span>
+        {q.description ? (
+          <span className="text-xs font-medium text-neutral-500" title={q.description}>
+            {q.description}
+          </span>
+        ) : (
+          <span className="font-mono text-[10px] text-neutral-400">banded over draws</span>
+        )}
+        {q.reference && (
+          <span className="ml-auto hidden shrink-0 text-[11px] italic text-neutral-400 sm:inline">
+            {q.reference}
+          </span>
+        )}
       </div>
       {isPending && <ForestSkeleton rows={1} />}
       {isError && (
@@ -227,10 +246,12 @@ function ScalarTable({
   runId,
   showScenario,
   colorOf,
+  infoOf,
 }: {
   runId: string
   showScenario: boolean
   colorOf: (scenario: string) => string
+  infoOf: Map<string, QuantityInfo>
 }) {
   const { data, isPending, isError } = useQuantityScalars(runId)
   const hasStrata = useMemo(
@@ -285,14 +306,38 @@ function ScalarTable({
                     className={cn(first && 'border-t border-neutral-100')}
                   >
                     <td className="px-3 py-1.5 text-left align-top">
-                      {first && (
-                        <span className="font-semibold text-neutral-900">{name}</span>
-                      )}
-                      {first && sourceTag(r.source) && (
-                        <span className="ml-2 font-mono text-[10px] uppercase tracking-wide text-neutral-400">
-                          {sourceTag(r.source)}
-                        </span>
-                      )}
+                      {first &&
+                        (() => {
+                          const info = infoOf.get(name)
+                          const hasSymbol = Boolean(info?.symbol && info.symbol !== name)
+                          return (
+                            <>
+                              <div className="flex items-baseline gap-1.5">
+                                <span className="font-semibold text-neutral-900">
+                                  {info?.symbol ?? name}
+                                </span>
+                                {hasSymbol && (
+                                  <span className="font-mono text-[10px] text-neutral-400">
+                                    {name}
+                                  </span>
+                                )}
+                                {sourceTag(r.source) && (
+                                  <span className="font-mono text-[10px] uppercase tracking-wide text-neutral-400">
+                                    {sourceTag(r.source)}
+                                  </span>
+                                )}
+                              </div>
+                              {info?.description && (
+                                <div
+                                  className="mt-0.5 max-w-[20rem] truncate text-[11px] font-normal text-neutral-500"
+                                  title={info.description}
+                                >
+                                  {info.description}
+                                </div>
+                              )}
+                            </>
+                          )
+                        })()}
                     </td>
                     {showScenario && (
                       <td className="px-2 py-1.5 text-left">
@@ -348,6 +393,10 @@ export function QuantitiesTab({ runId }: { runId: string }) {
   const colorMap = useMemo(() => buildScenarioColors(scenarios), [scenarios])
   const colorOf = (s: string) => colorMap.get(s) ?? SCENARIO_REFERENCE
   const showScenario = scenarios.length > 1
+  const infoOf = useMemo(
+    () => new Map(quantities.map((q) => [q.name, q])),
+    [quantities],
+  )
 
   if (run.isPending) {
     return (
@@ -385,7 +434,12 @@ export function QuantitiesTab({ runId }: { runId: string }) {
         </div>
       )}
       {scalars.length > 0 && (
-        <ScalarTable runId={runId} showScenario={showScenario} colorOf={colorOf} />
+        <ScalarTable
+          runId={runId}
+          showScenario={showScenario}
+          colorOf={colorOf}
+          infoOf={infoOf}
+        />
       )}
       {series.map((q) => (
         <SeriesQuantity key={q.name} runId={runId} q={q} colorOf={colorOf} />

@@ -6,6 +6,50 @@ import { CompareTable } from '@/components/CompareTable'
 import { DeltaElpdPlot } from '@/components/DeltaElpdPlot'
 import { ForestSkeleton, MutedNotice } from '@/components/States'
 import { Card } from '@/components/ui/card'
+import { cn } from '@/lib/utils'
+
+/** Flat baseline picker: `auto` (camdl's argmax-elpd) or a specific model by
+ *  its alias — the reference every Δelpd is measured against. */
+function BaselineSelect({
+  ids,
+  aliasOf,
+  value,
+  onChange,
+}: {
+  ids: string[]
+  aliasOf: Map<string, string>
+  value: string | undefined
+  onChange: (id: string | undefined) => void
+}) {
+  const opts: { id: string | undefined; label: string }[] = [
+    { id: undefined, label: 'auto (best elpd)' },
+    ...ids.map((id) => ({ id, label: aliasOf.get(id) ?? id })),
+  ]
+  return (
+    <div className="mb-3 flex flex-wrap items-baseline gap-x-3 gap-y-1">
+      <span className="text-[10px] font-medium uppercase tracking-wider text-neutral-400">
+        Baseline
+      </span>
+      <div className="flex flex-wrap items-center gap-3">
+        {opts.map((o) => (
+          <button
+            key={o.id ?? 'auto'}
+            type="button"
+            onClick={() => onChange(o.id)}
+            className={cn(
+              '-mb-px border-b-2 border-transparent pb-0.5 font-mono text-xs transition-colors',
+              o.id === value
+                ? 'border-neutral-900 text-neutral-900'
+                : 'text-neutral-500 hover:text-neutral-800',
+            )}
+          >
+            {o.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
 
 /**
  * Compare models by prequential (out-of-sample) predictive accuracy. Owns its
@@ -36,7 +80,12 @@ export function CompareWorkspace() {
       return next
     })
 
-  const cmp = useCompare(selectedIds)
+  // Baseline: `undefined` = auto (camdl's argmax elpd); ignored if it's no
+  // longer among the selected runs.
+  const [baseline, setBaseline] = useState<string>()
+  const effectiveBaseline =
+    baseline && selectedIds.includes(baseline) ? baseline : undefined
+  const cmp = useCompare(selectedIds, { baseline: effectiveBaseline })
 
   return (
     <div>
@@ -48,6 +97,14 @@ export function CompareWorkspace() {
       />
 
       <div className="mt-4">
+        {selectedIds.length >= 2 && !isError && (
+          <BaselineSelect
+            ids={selectedIds}
+            aliasOf={aliasOf}
+            value={effectiveBaseline}
+            onChange={setBaseline}
+          />
+        )}
         {isError ? (
           <MutedNotice
             title="Backend not reachable"
