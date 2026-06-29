@@ -205,9 +205,13 @@ class RunDetail(BaseModel):
     dimensions: list[DimensionInfo]
     findings: list[FindingGroup]
     available_streams: list[str]
-    # Generated quantities the fit's predict produced (manifest-driven); empty
-    # when `camdl fit predict` was never run, or the model has no quantities block.
+    # Generated quantities the fit's predict produced (manifest-driven, deduped to
+    # logical quantities); empty when `camdl fit predict` was never run, or the
+    # model has no quantities block.
     available_quantities: list[QuantityInfo] = []
+    # The scenario set the predict overlaid (e.g. baseline / no_sia / strong_sia);
+    # empty for a scenario-less (older) predict.
+    quantity_scenarios: list[str] = []
 
 
 # --- Source tab --------------------------------------------------------------
@@ -240,11 +244,14 @@ class SourceResponse(BaseModel):
 
 
 class PredictivePoint(BaseModel):
-    """One posterior-predictive ribbon point: quantiles at a time × stratum,
-    for a given forecast ``horizon`` and ``treatment``."""
+    """One posterior-predictive ribbon point: quantiles at a time × stratum, for
+    a given ``scenario`` × forecast ``horizon`` × ``treatment``. ``scenario`` is
+    ``as_fitted`` for a scenario-less predict (and for the in-sample one_step
+    rows, which are scenario-independent)."""
 
     time: float
     stratum: dict[str, str] = {}
+    scenario: str = "as_fitted"
     horizon: str = ""
     treatment: str = ""
     q05: float
@@ -269,6 +276,7 @@ class PredictiveResponse(BaseModel):
     run_id: str
     stream: str
     index_dims: list[str]
+    scenarios: list[str]
     horizons: list[str]
     treatments: list[str]
     predictive: list[PredictivePoint]
@@ -279,8 +287,10 @@ class PredictiveResponse(BaseModel):
 
 
 class QuantityBandPoint(BaseModel):
-    """One banded snapshot of a series quantity at a time × stratum."""
+    """One banded snapshot of a series quantity at a scenario × time × stratum.
+    ``scenario`` is ``as_fitted`` for an old (scenario-less) sidecar."""
 
+    scenario: str = "as_fitted"
     time: float
     stratum: dict[str, str] = {}
     q05: float
@@ -292,20 +302,23 @@ class QuantityBandPoint(BaseModel):
 
 class QuantitySeriesResponse(BaseModel):
     """A series quantity's banded trajectory — the ribbon payload. Faceted by
-    ``stratum`` on the frontend (one panel per cell)."""
+    ``stratum`` and overlaid by ``scenario`` on the frontend."""
 
     run_id: str
     name: str
     index_dims: list[str]
+    scenarios: list[str]
     points: list[QuantityBandPoint]
 
 
 class QuantityScalarRow(BaseModel):
-    """One banded scalar quantity (one row per stratum cell). A censorable
-    scalar carries ``p_censored`` (fraction of draws where the event never
-    fired); a fully-censored cell has ``q* = None`` (no band, only the count)."""
+    """One banded scalar quantity (one row per scenario × stratum cell). A
+    censorable scalar carries ``p_censored`` (fraction of draws where the event
+    never fired); a fully-censored cell has ``q* = None`` (no band, only the
+    count). ``scenario`` is ``as_fitted`` for an old (scenario-less) sidecar."""
 
     name: str
+    scenario: str = "as_fitted"
     reduce: str | None = None
     source: str
     stratum: dict[str, str] = {}
@@ -319,9 +332,12 @@ class QuantityScalarRow(BaseModel):
 
 
 class QuantityScalarsResponse(BaseModel):
-    """Every scalar quantity, one row per stratum cell — the quantities table."""
+    """Every scalar quantity, one row per scenario × stratum cell — the
+    quantities table. ``scenarios`` is the distinct scenario set (``[]`` when the
+    fit has no scenario axis)."""
 
     run_id: str
+    scenarios: list[str]
     rows: list[QuantityScalarRow]
 
 

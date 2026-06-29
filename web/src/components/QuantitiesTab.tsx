@@ -9,14 +9,13 @@ import { useQuantityScalars, useQuantitySeries, useRun } from '@/api/queries'
 import { ForestSkeleton, MutedNotice } from '@/components/States'
 import { Card } from '@/components/ui/card'
 import { fmtTick, fmtValue } from '@/lib/format'
+import { buildScenarioColors, SCENARIO_REFERENCE } from '@/lib/scenario'
 import { cn } from '@/lib/utils'
 
-const BAND = { band90: '#dbeafe', bandIqr: '#93c5fd', median: '#2563eb' } as const
 const AXIS = '#737373'
-const PANEL_HEIGHT = 180
+const PANEL_HEIGHT = 190
 const MONO = 'var(--font-mono)'
 
-/** A short provenance tag for non-state quantities (observations / derived). */
 function sourceTag(source: string): string | null {
   if (source === 'observations') return 'obs'
   if (source === 'derived') return 'derived'
@@ -29,18 +28,35 @@ function stratumLabel(stratum: Record<string, string>): string {
     .join(' · ')
 }
 
-// ── Series quantities — one banded ribbon per stratum cell ──────────────────
+/** A small scenario swatch + name — the shared legend/chip ink. */
+function ScenarioChip({ scenario, color }: { scenario: string; color: string }) {
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <span
+        className="inline-block size-2 shrink-0 rounded-[1px]"
+        style={{ background: color }}
+        aria-hidden
+      />
+      <span className="text-neutral-600">{scenario}</span>
+    </span>
+  )
+}
 
-/** One stratum's banded trajectory: nested 90%/IQR ribbons + a median line. */
-function BandPanel({
-  title,
-  points,
-}: {
-  title: string
+// ── Series quantities — scenario-overlaid banded ribbons ────────────────────
+
+interface ScenarioSeries {
+  scenario: string
+  color: string
   points: QuantityBandPoint[]
-}) {
+}
+
+/** One stratum's banded trajectory, overlaid by scenario. A lone scenario gets
+ *  the full 90%/IQR ribbon; multiple scenarios get a faint 90% band + a colored
+ *  median line each (so 5 arms stay legible). */
+function BandPanel({ title, series }: { title: string; series: ScenarioSeries[] }) {
   const ref = useRef<HTMLDivElement>(null)
   const [width, setWidth] = useState(0)
+  const solo = series.length === 1
 
   useEffect(() => {
     const el = ref.current
@@ -57,7 +73,23 @@ function BandPanel({
   useEffect(() => {
     const el = ref.current
     if (!el || width <= 0) return
-    const pts = [...points].sort((a, b) => a.time - b.time)
+    const marks: Plot.Markish[] = []
+    for (const s of series) {
+      const pts = [...s.points].sort((a, b) => a.time - b.time)
+      if (solo) {
+        marks.push(
+          Plot.areaY(pts, { x: 'time', y1: 'q05', y2: 'q95', fill: s.color, fillOpacity: 0.16 }),
+          Plot.areaY(pts, { x: 'time', y1: 'q25', y2: 'q75', fill: s.color, fillOpacity: 0.22 }),
+        )
+      } else {
+        marks.push(
+          Plot.areaY(pts, { x: 'time', y1: 'q05', y2: 'q95', fill: s.color, fillOpacity: 0.1 }),
+        )
+      }
+      marks.push(Plot.line(pts, { x: 'time', y: 'q50', stroke: s.color, strokeWidth: 1.3 }))
+    }
+    marks.push(Plot.ruleY([0], { stroke: '#e5e5e5', strokeWidth: 0.5 }))
+
     const node = Plot.plot({
       width,
       height: PANEL_HEIGHT,
@@ -75,18 +107,13 @@ function BandPanel({
         tickFormat: (d: number) => fmtTick(d),
         grid: true,
       },
-      marks: [
-        Plot.areaY(pts, { x: 'time', y1: 'q05', y2: 'q95', fill: BAND.band90, fillOpacity: 0.6 }),
-        Plot.areaY(pts, { x: 'time', y1: 'q25', y2: 'q75', fill: BAND.bandIqr, fillOpacity: 0.55 }),
-        Plot.line(pts, { x: 'time', y: 'q50', stroke: BAND.median, strokeWidth: 1.25 }),
-        Plot.ruleY([0], { stroke: '#e5e5e5', strokeWidth: 0.5 }),
-      ],
+      marks,
     })
     el.replaceChildren(node)
     return () => {
       node.remove()
     }
-  }, [points, width])
+  }, [series, width, solo])
 
   return (
     <div className="border-t border-neutral-100 px-3 py-2">
@@ -102,22 +129,44 @@ function BandPanel({
   )
 }
 
-function SeriesQuantity({ runId, q }: { runId: string; q: QuantityInfo }) {
+function SeriesQuantity({
+  runId,
+  q,
+  colorOf,
+}: {
+  runId: string
+  q: QuantityInfo
+  colorOf: (scenario: string) => string
+}) {
   const { data, isPending, isError } = useQuantitySeries(runId, q.name)
   const tag = sourceTag(q.source)
 
-  // One panel per stratum cell (none → a single panel).
-  const strata = useMemo(() => {
+  // One panel per stratum cell; within a panel, one ribbon per scenario.
+  const panels = useMemo(() => {
     if (!data) return []
-    const groups = new Map<string, { stratum: Record<string, string>; points: QuantityBandPoint[] }>()
+    const byStratum = new Map<
+      string,
+      { stratum: Record<string, string>; byScenario: Map<string, QuantityBandPoint[]> }
+    >()
     for (const p of data.points) {
       const key = JSON.stringify(p.stratum)
-      const g = groups.get(key)
-      if (g) g.points.push(p)
-      else groups.set(key, { stratum: p.stratum, points: [p] })
+      let g = byStratum.get(key)
+      if (!g) {
+        g = { stratum: p.stratum, byScenario: new Map() }
+        byStratum.set(key, g)
+      }
+      const arr = g.byScenario.get(p.scenario)
+      if (arr) arr.push(p)
+      else g.byScenario.set(p.scenario, [p])
     }
-    return [...groups.values()]
-  }, [data])
+    const order = data.scenarios.length ? data.scenarios : ['as_fitted']
+    return [...byStratum.values()].map((g) => ({
+      stratum: g.stratum,
+      series: order
+        .filter((s) => g.byScenario.has(s))
+        .map((s) => ({ scenario: s, color: colorOf(s), points: g.byScenario.get(s)! })),
+    }))
+  }, [data, colorOf])
 
   return (
     <Card className="overflow-hidden">
@@ -139,18 +188,18 @@ function SeriesQuantity({ runId, q }: { runId: string; q: QuantityInfo }) {
         />
       )}
       {data &&
-        strata.map((s) => (
+        panels.map((p) => (
           <BandPanel
-            key={JSON.stringify(s.stratum)}
-            title={stratumLabel(s.stratum) || 'all'}
-            points={s.points}
+            key={JSON.stringify(p.stratum)}
+            title={stratumLabel(p.stratum) || 'all'}
+            series={p.series}
           />
         ))}
     </Card>
   )
 }
 
-// ── Scalar quantities — one censoring-aware table ───────────────────────────
+// ── Scalar quantities — one censoring-aware table, faceted by scenario ──────
 
 function ScalarBand({
   q50,
@@ -174,47 +223,31 @@ function ScalarBand({
   )
 }
 
-function ScalarRow({ r, hasStrata }: { r: QuantityScalarRow; hasStrata: boolean }) {
-  const tag = sourceTag(r.source)
-  const censored =
-    r.p_censored == null ? null : Math.round(r.p_censored * 100)
-  return (
-    <tr className="border-b border-neutral-100 last:border-b-0">
-      <td className="px-3 py-2 text-left">
-        <span className="font-semibold text-neutral-900">{r.name}</span>
-        {tag && (
-          <span className="ml-2 font-mono text-[10px] uppercase tracking-wide text-neutral-400">
-            {tag}
-          </span>
-        )}
-      </td>
-      <td className="px-2 py-2 text-left text-neutral-500">{r.reduce ?? '—'}</td>
-      {hasStrata && (
-        <td className="px-2 py-2 text-left text-neutral-600">
-          {stratumLabel(r.stratum) || '—'}
-        </td>
-      )}
-      <td className="px-3 py-2 text-right">
-        <ScalarBand q50={r.q50} q05={r.q05} q95={r.q95} />
-      </td>
-      <td
-        className={cn(
-          'px-3 py-2 text-right',
-          censored && censored > 0 ? 'text-amber-600' : 'text-neutral-400',
-        )}
-      >
-        {censored == null ? '—' : `${censored}%`}
-      </td>
-    </tr>
-  )
-}
-
-function ScalarTable({ runId }: { runId: string }) {
+function ScalarTable({
+  runId,
+  showScenario,
+  colorOf,
+}: {
+  runId: string
+  showScenario: boolean
+  colorOf: (scenario: string) => string
+}) {
   const { data, isPending, isError } = useQuantityScalars(runId)
   const hasStrata = useMemo(
     () => (data?.rows ?? []).some((r) => Object.keys(r.stratum).length > 0),
     [data],
   )
+
+  // Group rows by quantity (the name shows once per group), preserving order.
+  const groups = useMemo(() => {
+    const m = new Map<string, QuantityScalarRow[]>()
+    for (const r of data?.rows ?? []) {
+      const arr = m.get(r.name)
+      if (arr) arr.push(r)
+      else m.set(r.name, [r])
+    }
+    return [...m.entries()]
+  }, [data])
 
   if (isPending) return <ForestSkeleton rows={2} />
   if (isError)
@@ -234,6 +267,7 @@ function ScalarTable({ runId }: { runId: string }) {
           <thead>
             <tr className="border-b border-neutral-200 text-[10px] uppercase tracking-wide text-neutral-400">
               <th className="px-3 py-2 text-left font-medium">Quantity</th>
+              {showScenario && <th className="px-2 py-2 text-left font-medium">scenario</th>}
               <th className="px-2 py-2 text-left font-medium">reduce</th>
               {hasStrata && <th className="px-2 py-2 text-left font-medium">stratum</th>}
               <th className="px-3 py-2 text-right font-medium">median [90%]</th>
@@ -241,13 +275,53 @@ function ScalarTable({ runId }: { runId: string }) {
             </tr>
           </thead>
           <tbody>
-            {data.rows.map((r) => (
-              <ScalarRow
-                key={`${r.name}-${JSON.stringify(r.stratum)}`}
-                r={r}
-                hasStrata={hasStrata}
-              />
-            ))}
+            {groups.map(([name, rows]) =>
+              rows.map((r, i) => {
+                const censored = r.p_censored == null ? null : Math.round(r.p_censored * 100)
+                const first = i === 0
+                return (
+                  <tr
+                    key={`${name}-${r.scenario}-${JSON.stringify(r.stratum)}`}
+                    className={cn(first && 'border-t border-neutral-100')}
+                  >
+                    <td className="px-3 py-1.5 text-left align-top">
+                      {first && (
+                        <span className="font-semibold text-neutral-900">{name}</span>
+                      )}
+                      {first && sourceTag(r.source) && (
+                        <span className="ml-2 font-mono text-[10px] uppercase tracking-wide text-neutral-400">
+                          {sourceTag(r.source)}
+                        </span>
+                      )}
+                    </td>
+                    {showScenario && (
+                      <td className="px-2 py-1.5 text-left">
+                        <ScenarioChip scenario={r.scenario} color={colorOf(r.scenario)} />
+                      </td>
+                    )}
+                    <td className="px-2 py-1.5 text-left text-neutral-500">
+                      {first ? (r.reduce ?? '—') : ''}
+                    </td>
+                    {hasStrata && (
+                      <td className="px-2 py-1.5 text-left text-neutral-600">
+                        {stratumLabel(r.stratum) || '—'}
+                      </td>
+                    )}
+                    <td className="px-3 py-1.5 text-right">
+                      <ScalarBand q50={r.q50} q05={r.q05} q95={r.q95} />
+                    </td>
+                    <td
+                      className={cn(
+                        'px-3 py-1.5 text-right',
+                        censored && censored > 0 ? 'text-amber-600' : 'text-neutral-400',
+                      )}
+                    >
+                      {censored == null ? '—' : `${censored}%`}
+                    </td>
+                  </tr>
+                )
+              }),
+            )}
           </tbody>
         </table>
       </div>
@@ -259,16 +333,21 @@ function ScalarTable({ runId }: { runId: string }) {
 
 /**
  * Generated quantities (`camdl fit predict`'s `quantities/` sidecar): named,
- * non-scored reductions of what the model produces, banded over draws. The
- * manifest's `shape` drives the layout — `scalar` quantities (attack rate, peak,
- * time-to-event) collapse into one table up top; `series` quantities (prevalence,
- * Rₑ(t)) each get a banded ribbon below.
+ * non-scored reductions of what the model produces, banded over draws and — for
+ * a scenario-aware predict — overlaid by scenario. The manifest's `shape` drives
+ * the layout: `scalar` quantities collapse into one table (a row per scenario),
+ * `series` quantities each get a scenario-overlaid ribbon.
  */
 export function QuantitiesTab({ runId }: { runId: string }) {
   const run = useRun(runId)
   const quantities = run.data?.available_quantities ?? []
+  const scenarios = run.data?.quantity_scenarios ?? []
   const series = quantities.filter((q) => q.shape === 'series')
   const scalars = quantities.filter((q) => q.shape === 'scalar')
+
+  const colorMap = useMemo(() => buildScenarioColors(scenarios), [scenarios])
+  const colorOf = (s: string) => colorMap.get(s) ?? SCENARIO_REFERENCE
+  const showScenario = scenarios.length > 1
 
   if (run.isPending) {
     return (
@@ -295,9 +374,21 @@ export function QuantitiesTab({ runId }: { runId: string }) {
 
   return (
     <div className="space-y-4">
-      {scalars.length > 0 && <ScalarTable runId={runId} />}
+      {showScenario && (
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 px-1 font-mono text-[11px]">
+          <span className="text-[10px] uppercase tracking-wide text-neutral-400">
+            Scenarios
+          </span>
+          {scenarios.map((s) => (
+            <ScenarioChip key={s} scenario={s} color={colorOf(s)} />
+          ))}
+        </div>
+      )}
+      {scalars.length > 0 && (
+        <ScalarTable runId={runId} showScenario={showScenario} colorOf={colorOf} />
+      )}
       {series.map((q) => (
-        <SeriesQuantity key={q.name} runId={runId} q={q} />
+        <SeriesQuantity key={q.name} runId={runId} q={q} colorOf={colorOf} />
       ))}
     </div>
   )

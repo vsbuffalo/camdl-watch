@@ -258,6 +258,7 @@ def _run_detail(meta: RunMeta, rs: RunState) -> RunDetail:
         families=[ParamFamily(base=b, members=ms) for b, ms in pg.families.items()],
         default_selection=pg.default_selection(),
     )
+    _quantity_manifest = quantities_mod.read_manifest(meta.run_dir)
     return RunDetail(
         run_id=meta.run_id,
         label=meta.display_label,
@@ -282,8 +283,9 @@ def _run_detail(meta: RunMeta, rs: RunState) -> RunDetail:
                 index_dims=q.index_dims, reduce=q.reduce, unit=q.unit,
                 censorable=q.censorable,
             )
-            for q in quantities_mod.read_manifest(meta.run_dir)
+            for q in _quantity_manifest.quantities
         ],
+        quantity_scenarios=_quantity_manifest.scenarios,
     )
 
 
@@ -643,14 +645,19 @@ def get_predictive(run_id: str, stream: str) -> PredictiveResponse:
 
     horizons: set[str] = set()
     treatments: set[str] = set()
+    scenarios: list[str] = []
     pred_points: list[PredictivePoint] = []
     for r in ps.table.to_dicts():
         h, t = str(r.get("horizon") or ""), str(r.get("treatment") or "")
+        sc = str(r.get("scenario") or "as_fitted")
         horizons.add(h)
         treatments.add(t)
+        if sc not in scenarios:
+            scenarios.append(sc)
         pred_points.append(
             PredictivePoint(
-                time=_fnum(r.get("time")), stratum=stratum(r), horizon=h, treatment=t,
+                time=_fnum(r.get("time")), stratum=stratum(r),
+                scenario=sc, horizon=h, treatment=t,
                 q05=_fnum(r.get("q05")), q25=_fnum(r.get("q25")), q50=_fnum(r.get("q50")),
                 q75=_fnum(r.get("q75")), q95=_fnum(r.get("q95")),
             )
@@ -667,7 +674,7 @@ def get_predictive(run_id: str, stream: str) -> PredictiveResponse:
             )
     return PredictiveResponse(
         run_id=run_id, stream=stream, index_dims=index_dims,
-        horizons=sorted(horizons), treatments=sorted(treatments),
+        scenarios=scenarios, horizons=sorted(horizons), treatments=sorted(treatments),
         predictive=pred_points, observed=obs_points,
     )
 
@@ -699,12 +706,9 @@ def get_quantity_series(run_id: str, name: str) -> QuantitySeriesResponse:
     meta = _find_meta(store, run_id)
     if meta is None:
         raise HTTPException(status_code=404, detail=f"run not found: {run_id}")
+    manifest = quantities_mod.read_manifest(meta.run_dir)
     qm = next(
-        (
-            q
-            for q in quantities_mod.read_manifest(meta.run_dir)
-            if q.name == name and q.shape == "series"
-        ),
+        (q for q in manifest.quantities if q.name == name and q.shape == "series"),
         None,
     )
     if qm is None:
@@ -714,6 +718,7 @@ def get_quantity_series(run_id: str, name: str) -> QuantitySeriesResponse:
         raise HTTPException(status_code=404, detail=f"no data for quantity: {name}")
     points = [
         QuantityBandPoint(
+            scenario=str(r.get("scenario") or "as_fitted"),
             time=_fnum(r.get("time")),
             stratum=_stratum_of(r, qm.index_dims),
             q05=_fnum(r.get("q05")), q25=_fnum(r.get("q25")), q50=_fnum(r.get("q50")),
@@ -722,7 +727,8 @@ def get_quantity_series(run_id: str, name: str) -> QuantitySeriesResponse:
         for r in df.iter_rows(named=True)
     ]
     return QuantitySeriesResponse(
-        run_id=run_id, name=name, index_dims=qm.index_dims, points=points
+        run_id=run_id, name=name, index_dims=qm.index_dims,
+        scenarios=manifest.scenarios, points=points,
     )
 
 
@@ -734,8 +740,9 @@ def get_quantity_scalars(run_id: str) -> QuantityScalarsResponse:
     meta = _find_meta(store, run_id)
     if meta is None:
         raise HTTPException(status_code=404, detail=f"run not found: {run_id}")
+    manifest = quantities_mod.read_manifest(meta.run_dir)
     rows: list[QuantityScalarRow] = []
-    for qm in quantities_mod.read_manifest(meta.run_dir):
+    for qm in manifest.quantities:
         if qm.shape != "scalar":
             continue
         df = quantities_mod.read_quantity(meta.run_dir, qm.name)
@@ -745,7 +752,9 @@ def get_quantity_scalars(run_id: str) -> QuantityScalarsResponse:
             pc = r.get("p_censored")
             rows.append(
                 QuantityScalarRow(
-                    name=qm.name, reduce=qm.reduce, source=qm.source,
+                    name=qm.name,
+                    scenario=str(r.get("scenario") or "as_fitted"),
+                    reduce=qm.reduce, source=qm.source,
                     stratum=_stratum_of(r, qm.index_dims),
                     n_draws=int(r.get("n_draws") or 0),
                     p_censored=(_band_cell(pc) if pc is not None else None),
@@ -754,7 +763,9 @@ def get_quantity_scalars(run_id: str) -> QuantityScalarsResponse:
                     q95=_band_cell(r.get("q95")),
                 )
             )
-    return QuantityScalarsResponse(run_id=run_id, rows=rows)
+    return QuantityScalarsResponse(
+        run_id=run_id, scenarios=manifest.scenarios, rows=rows
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -38,7 +38,9 @@ MANIFEST = "quantities.json"
 
 @dataclass(frozen=True)
 class QuantityMeta:
-    """One manifest entry — what a quantity is and how to render it."""
+    """One *logical* quantity — what it is and how to render it. Scenario-agnostic
+    (shape/source/reduce/docs are identical across scenarios); the scenario axis
+    lives on :class:`Manifest` and in each TSV's ``scenario`` column."""
 
     name: str
     shape: str  # "series" | "scalar"
@@ -49,20 +51,39 @@ class QuantityMeta:
     censorable: bool  # the reduction can fail to fire → a censoring trio + p_censored
 
 
-def read_manifest(run_dir: Path) -> list[QuantityMeta]:
-    """The quantities the manifest lists (authoritative). ``[]`` when the fit has
-    no quantities sidecar (never predicted, or no ``quantities {}`` block)."""
+@dataclass(frozen=True)
+class Manifest:
+    """A fit's quantities manifest, denormalized then collapsed: ``quantities``
+    are the *logical* quantities (deduped by name — the scenario-aware
+    ``fit predict`` emits one manifest entry per quantity × scenario), and
+    ``scenarios`` is the distinct scenario set (``[]`` for an old, scenario-less
+    sidecar — its TSVs carry no ``scenario`` column)."""
+
+    quantities: list[QuantityMeta]
+    scenarios: list[str]
+
+
+def read_manifest(run_dir: Path) -> Manifest:
+    """The fit's quantities manifest, collapsed to logical quantities + the
+    scenario set. Empty (no quantities, no scenarios) when the fit has no
+    sidecar (never predicted, or no ``quantities {}`` block)."""
     try:
         raw = json.loads((Path(run_dir) / MANIFEST).read_text())
     except (OSError, json.JSONDecodeError):
-        return []
-    out: list[QuantityMeta] = []
+        return Manifest(quantities=[], scenarios=[])
+    by_name: dict[str, QuantityMeta] = {}
+    order: list[str] = []
+    scenarios: list[str] = []
     for q in raw.get("quantities", []):
         name = q.get("name")
         if not name:
             continue
-        out.append(
-            QuantityMeta(
+        sc = q.get("scenario")
+        if sc is not None and sc not in scenarios:
+            scenarios.append(sc)
+        if name not in by_name:
+            order.append(name)
+            by_name[name] = QuantityMeta(
                 name=name,
                 shape=q.get("shape", "scalar"),
                 source=q.get("source", "state"),
@@ -71,8 +92,7 @@ def read_manifest(run_dir: Path) -> list[QuantityMeta]:
                 unit=q.get("unit"),
                 censorable=isinstance(q.get("censoring"), dict),
             )
-        )
-    return out
+    return Manifest(quantities=[by_name[n] for n in order], scenarios=scenarios)
 
 
 def _read_tsv(path: Path) -> pl.DataFrame | None:

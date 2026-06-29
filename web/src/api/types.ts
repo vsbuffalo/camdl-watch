@@ -627,8 +627,10 @@ export interface components {
         };
         /**
          * PredictivePoint
-         * @description One posterior-predictive ribbon point: quantiles at a time × stratum,
-         *     for a given forecast ``horizon`` and ``treatment``.
+         * @description One posterior-predictive ribbon point: quantiles at a time × stratum, for
+         *     a given ``scenario`` × forecast ``horizon`` × ``treatment``. ``scenario`` is
+         *     ``as_fitted`` for a scenario-less predict (and for the in-sample one_step
+         *     rows, which are scenario-independent).
          */
         PredictivePoint: {
             /** Time */
@@ -640,6 +642,11 @@ export interface components {
             stratum: {
                 [key: string]: string;
             };
+            /**
+             * Scenario
+             * @default as_fitted
+             */
+            scenario: string;
             /**
              * Horizon
              * @default
@@ -673,6 +680,8 @@ export interface components {
             stream: string;
             /** Index Dims */
             index_dims: string[];
+            /** Scenarios */
+            scenarios: string[];
             /** Horizons */
             horizons: string[];
             /** Treatments */
@@ -718,9 +727,15 @@ export interface components {
         };
         /**
          * QuantityBandPoint
-         * @description One banded snapshot of a series quantity at a time × stratum.
+         * @description One banded snapshot of a series quantity at a scenario × time × stratum.
+         *     ``scenario`` is ``as_fitted`` for an old (scenario-less) sidecar.
          */
         QuantityBandPoint: {
+            /**
+             * Scenario
+             * @default as_fitted
+             */
+            scenario: string;
             /** Time */
             time: number;
             /**
@@ -770,13 +785,19 @@ export interface components {
         };
         /**
          * QuantityScalarRow
-         * @description One banded scalar quantity (one row per stratum cell). A censorable
-         *     scalar carries ``p_censored`` (fraction of draws where the event never
-         *     fired); a fully-censored cell has ``q* = None`` (no band, only the count).
+         * @description One banded scalar quantity (one row per scenario × stratum cell). A
+         *     censorable scalar carries ``p_censored`` (fraction of draws where the event
+         *     never fired); a fully-censored cell has ``q* = None`` (no band, only the
+         *     count). ``scenario`` is ``as_fitted`` for an old (scenario-less) sidecar.
          */
         QuantityScalarRow: {
             /** Name */
             name: string;
+            /**
+             * Scenario
+             * @default as_fitted
+             */
+            scenario: string;
             /** Reduce */
             reduce?: string | null;
             /** Source */
@@ -805,18 +826,22 @@ export interface components {
         };
         /**
          * QuantityScalarsResponse
-         * @description Every scalar quantity, one row per stratum cell — the quantities table.
+         * @description Every scalar quantity, one row per scenario × stratum cell — the
+         *     quantities table. ``scenarios`` is the distinct scenario set (``[]`` when the
+         *     fit has no scenario axis).
          */
         QuantityScalarsResponse: {
             /** Run Id */
             run_id: string;
+            /** Scenarios */
+            scenarios: string[];
             /** Rows */
             rows: components["schemas"]["QuantityScalarRow"][];
         };
         /**
          * QuantitySeriesResponse
          * @description A series quantity's banded trajectory — the ribbon payload. Faceted by
-         *     ``stratum`` on the frontend (one panel per cell).
+         *     ``stratum`` and overlaid by ``scenario`` on the frontend.
          */
         QuantitySeriesResponse: {
             /** Run Id */
@@ -825,6 +850,8 @@ export interface components {
             name: string;
             /** Index Dims */
             index_dims: string[];
+            /** Scenarios */
+            scenarios: string[];
             /** Points */
             points: components["schemas"]["QuantityBandPoint"][];
         };
@@ -867,6 +894,11 @@ export interface components {
              * @default []
              */
             available_quantities: components["schemas"]["QuantityInfo"][];
+            /**
+             * Quantity Scenarios
+             * @default []
+             */
+            quantity_scenarios: string[];
         };
         /**
          * RunSummary
